@@ -48,6 +48,8 @@ class Program:
 
 PROGRAMS = {
     "ash": Program("Ash 1-step 100k", (0.02,), 0.03, 0.06, True),
+    # user's account panel: 7-day limit, 2% target; daily/max assumed as Ash (manager to confirm)
+    "ash_turbo": Program("Ash Turbo 100k (7 days)", (0.02,), 0.03, 0.06, True, 35, 7),
     "phoenix": Program("Phoenix 2-step 100k", (0.04, 0.04), 0.04, 0.06, False),
     "thunderbolt": Program("Thunderbolt 1-step 100k", (0.05,), 0.03, 0.06, True),
 }
@@ -243,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
                                      args.daily_pct / 100.0, args.max_pct / 100.0, args.trailing, args.inactivity_days,
                                      args.time_limit_days)
     text = "# Upcomers challenge simulation\n\n" + "\n".join(
-        report(days, p, risks, args.runs, args.seed) for p in (args.program or ["ash", "phoenix", "thunderbolt"]))
+        report(days, p, risks, args.runs, args.seed) for p in (args.program or ["ash_turbo", "ash", "phoenix", "thunderbolt"]))
     if args.output:
         args.output.write_text(text, encoding="utf-8")
     sys.stdout.write(text)
