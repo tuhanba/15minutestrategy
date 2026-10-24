@@ -1,0 +1,30 @@
+# Prop firma kuralları — KULLANICI DOLDURACAK. Firma adı ve kurallar tahmin EDİLMEMİŞTİR.
+# verified: false iken canlı mod başlatılamaz.
+verified: false
+firm_name: null
+program: null                # challenge | verification | funded
+account_size: 100000
+source_url: null
+verified_on: null            # YYYY-MM-DD
+
+daily_loss:
+  amount: null               # $ veya %
+  reference: null            # balance_start_of_day | equity_start_of_day | max_of_both
+  reset_time: null           # ör. "00:00"
+  reset_tz: null             # ör. "Europe/Prague" veya "SERVER"
+  includes_floating: null    # true/false
+
+max_loss:
+  amount: null
+  type: null                 # static | trailing_eod | trailing_intraday
+  trail_lock_at: null
+
+profit_target: null
+min_trading_days: null
+news_restriction: null       # açıklama + pencere dakikaları
+weekend_holding_allowed: null
+overnight_holding_allowed: null
+max_lots: null
+leverage: null
+ea_allowed: null
+consistency_rule: null
