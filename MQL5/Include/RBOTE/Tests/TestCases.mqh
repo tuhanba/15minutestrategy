@@ -631,34 +631,61 @@ void Test_RiskGuard(CRBTest &t)
    lim.max_pending = 0;
    RBRiskSnapshot s;
    s.balance = 99500.0;
-   s.equity = 99400.0;
+   s.equity = 99500.0;
    s.day_start_ref = 100000.0;
    s.realized_today = -500.0;
    s.open_risk = 250.0;
+   s.open_risk_now = 250.0;
    s.pending_risk = 250.0;
    s.trades_today = 1;
    s.positions = 1;
    s.pending = 1;
    s.unprotected_position = false;
-   t.Check(RB_CheckNewOrder(lim, s, 250.0) == 2, "-500 -250 -250 -250 < -1000 -> denied");
-   t.Check(RB_CheckNewOrder(lim, s, 0.0) == 0, "exactly at -1000 is still allowed");
+   // limit 1% of 100k = 1000; worst equity = 99500 - 250 - 250 - new
+   t.Check(RB_CheckNewOrder(lim, s, 250.0) == 2, "99500-250-250-250 = 98750 < 99000 -> denied");
+   t.Check(RB_CheckNewOrder(lim, s, 0.0) == 0, "exactly 99000 is still allowed");
    s.pending_risk = 0.0;
-   t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "-1000 allowed when pending is gone");
-   s.realized_today = 300.0;
+   t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "99000 allowed when pending is gone");
+   // overnight profit: day ref 101000 (equity at 00:00), position gave back 600 -> equity 100400
+   RBRiskSnapshot o = s;
+   o.balance = 100000.0;
+   o.equity = 100400.0;
+   o.day_start_ref = 101000.0;
+   o.realized_today = 0.0;
+   o.open_risk_now = 300.0;
+   o.pending_risk = 0.0;
+   t.Check(RB_CheckNewOrder(lim, o, 200.0) == 2, "overnight give-back counted: 100400-300-200 = 99900 < 100000");
+   t.Check(RB_CheckNewOrder(lim, o, 50.0) == 0, "100400-300-50 = 100050 >= 100000");
+   t.Check(!RB_DailyLimitBreached(lim, o), "equity 100400 vs ref 101000: -600 > -1010");
+   o.equity = 99990.0;
+   t.Check(RB_DailyLimitBreached(lim, o), "equity 99990 vs ref 101000: -1010 breached");
+   // fixed daily amount on the initial balance (Ash Turbo style)
+   RBRiskLimits fx = lim;
+   fx.daily_on_initial = true;
+   fx.initial_balance = 100000.0;
+   t.Near(RB_DailyLimitMoney(fx, o), 1000.0, 1e-9, "daily limit on initial balance");
+   t.Near(RB_DailyLimitMoney(lim, o), 1010.0, 1e-9, "daily limit on day reference");
    s.pending_risk = 250.0;
+   s.equity = 100300.0;
+   s.balance = 100300.0;
+   s.day_start_ref = 100000.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "realized profit offsets");
    s.unprotected_position = true;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 1, "position without SL blocks new orders");
    s.unprotected_position = false;
+   s.equity = 99400.0;
+   s.day_start_ref = 99400.0;   // isolate the exposure cap from the daily check
    lim.max_open_risk_pct = 0.005;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 3, "open+pending+new 750 > 0.5% of equity");
    lim.max_open_risk_pct = 0.0;
+   s.equity = 100300.0;
    lim.max_trades_per_day = 1;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 5, "max trades per day");
    lim.max_trades_per_day = 0;
    lim.max_total_dd_pct = 0.05;
    lim.initial_balance = 100000.0;
    s.equity = 95400.0;
+   s.day_start_ref = 95400.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 4, "total DD floor 95000");
    // trailing floor (Ash): peak 103000 -> floor 99000; locked at 100000 once the peak reaches 104000
    lim.trailing_dd = true;
@@ -672,8 +699,10 @@ void Test_RiskGuard(CRBTest &t)
    lim.peak_equity = 103000.0;
    s.equity = 99600.0;
    s.open_risk = 0.0;
+   s.open_risk_now = 0.0;
    s.pending_risk = 0.0;
    s.realized_today = 0.0;
+   s.day_start_ref = 99600.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "99600 - 250 above trailing floor 99000");
    t.Check(RB_CheckNewOrder(lim, s, 700.0) == 4, "99600 - 700 below trailing floor 99000");
    // challenge state (Ash Turbo)
@@ -723,13 +752,16 @@ void Test_Safety(CRBTest &t)
    t.Check(!RB_DataFresh(true, 1700000000, 1700000900 + 1800, 900, 2), "two bars missing -> stale");
 
    // 24. live trading disabled by default
-   t.Check(RB_TradingPermission(false, RB_ACC_REAL, false, 0, 12345, false) == 2, "real account refused by default");
-   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 999, 12345, true) == 3, "login confirmation mismatch");
-   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 12345, 12345, false) == 4, "prop rules unverified");
-   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 12345, 12345, true) == 0, "all three gates -> live");
-   t.Check(RB_TradingPermission(false, RB_ACC_DEMO, false, 0, 12345, false) == 0, "demo allowed");
-   t.Check(RB_TradingPermission(true, RB_ACC_REAL, false, 0, 12345, false) == 0, "tester allowed");
-   t.Check(RB_TradingPermission(false, RB_ACC_CONTEST, true, 12345, 12345, true) == 1, "contest refused");
+   t.Check(RB_TradingPermission(false, RB_ACC_REAL, false, 12345, 12345, false, true) == 2, "real account refused by default");
+   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 999, 12345, true, true) == 3, "login confirmation mismatch");
+   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 12345, 12345, false, true) == 4, "prop rules unverified");
+   t.Check(RB_TradingPermission(false, RB_ACC_REAL, true, 12345, 12345, true, true) == 0, "all gates -> live");
+   t.Check(RB_TradingPermission(false, RB_ACC_DEMO, false, 12345, 12345, false, true) == 0, "confirmed demo allowed");
+   t.Check(RB_TradingPermission(false, RB_ACC_DEMO, false, 0, 12345, false, true) == 3, "demo / prop evaluation needs login confirmation");
+   t.Check(RB_TradingPermission(false, RB_ACC_DEMO, false, 0, 0, false, false) == 5, "not logged in -> refused (no silent demo)");
+   t.Check(RB_TradingPermission(false, RB_ACC_DEMO, false, 12345, 12345, false, false) == 5, "not connected -> refused");
+   t.Check(RB_TradingPermission(true, RB_ACC_REAL, false, 0, 12345, false, false) == 0, "tester allowed");
+   t.Check(RB_TradingPermission(false, RB_ACC_CONTEST, true, 12345, 12345, true, true) == 1, "contest refused");
   }
 
 //--- 20. lookahead: signals known at bar t never change when future bars are added

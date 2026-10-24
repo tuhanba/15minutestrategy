@@ -57,8 +57,15 @@ struct Options
    RBScaleCfg scale;
    RBEdgeCfg edge;
    RBMgmtCfg mgmt;
-   double firm_daily_pct = 0.04; // reported only
+   double swap_long = 0.0;       // $ per lot per night (negative = cost), charged at the rollover hour
+   double swap_short = 0.0;      // triple on Wednesday night
+   int swap_hour = 21;           // UTC rollover hour (manager D-026)
+   bool end_close = true;        // close an open position at the end of the period (reason END)
+   // firm rules, reported only (Upcomers Ash Turbo: daily 3% of initial, 6% equity-peak shield)
+   double firm_daily_pct = 0.03;
+   bool firm_daily_on_initial = true;
    double firm_max_dd_pct = 0.06;
+   bool firm_dd_trailing = true;
 };
 
 static long long parse_time(const char *s)
@@ -155,6 +162,8 @@ struct Position
    double best = 0, worst = 0;
    bool partial_done = false;
    double realized = 0; // net money realized so far (partials, commission)
+   double swap = 0;     // accumulated swap, realized at the final close
+   long long last_swap_day = -1;
    long long open_time = 0;
    double fill = 0;
 };
@@ -181,6 +190,9 @@ struct Engine
    std::map<std::string, long> rejects;
    long n_signals = 0, n_orders = 0, n_trades = 0, n_firm_daily = 0, n_personal_daily = 0;
    double min_equity_ever = 0;
+   double firm_peak_eq = 0;
+   bool firm_dd_breached = false;
+   long long firm_dd_breach_time = 0;
 
    void reject(const std::string &why) { rejects[why]++; }
 
@@ -265,16 +277,38 @@ struct Engine
          return 0.0;
       int dir = pos.p.plan.dir;
       double px = dir == RB_DIR_BULL ? (worst_case ? m.bl : m.bc) : (worst_case ? m.ah : m.ac);
-      return dir * (px - pos.fill) * pos.lots / spec.tick_size * spec.tick_value_loss;
+      return dir * (px - pos.fill) * pos.lots / spec.tick_size * spec.tick_value_loss + pos.swap;
      }
 
-   double pos_open_risk() const
+   // loss if the stop is hit, measured from `from` (+ commission + slippage allowance)
+   double stop_loss_from(double from) const
+     {
+      int dir = pos.p.plan.dir;
+      double loss = dir * (from - pos.sl) * pos.lots / spec.tick_size * spec.tick_value_loss;
+      return std::max(0.0, loss) + (o.commission + o.slip_ticks * spec.tick_value_loss) * pos.lots;
+     }
+
+   double pos_open_risk() const { return pos.active ? stop_loss_from(pos.fill) : 0.0; }
+
+   double pos_risk_now(const M1 &m) const
      {
       if(!pos.active)
          return 0.0;
-      int dir = pos.p.plan.dir;
-      double loss = dir * (pos.fill - pos.sl) * pos.lots / spec.tick_size * spec.tick_value_loss;
-      return std::max(0.0, loss) + o.commission * pos.lots;
+      return stop_loss_from(pos.p.plan.dir == RB_DIR_BULL ? m.bc : m.ac) - std::min(0.0, pos.swap);
+     }
+
+   // overnight swap at the rollover hour (UTC), triple on Wednesday night
+   void apply_swap(const M1 &m)
+     {
+      if(!pos.active)
+         return;
+      long long day = m.t / 86400;
+      long long rollover = day * 86400 + (long long)o.swap_hour * 3600;
+      if(m.t < rollover || pos.open_time >= rollover || pos.last_swap_day == day)
+         return;
+      pos.last_swap_day = day;
+      double per_lot = pos.p.plan.dir == RB_DIR_BULL ? o.swap_long : o.swap_short;
+      pos.swap += per_lot * pos.lots * (utc_wday(m.t) == 3 ? 3.0 : 1.0);
      }
 
    void new_day_if_needed(const M1 &m)
@@ -300,9 +334,9 @@ struct Engine
       std::fprintf(fd, "%s;%.2f;%.2f;%.2f;%.2f;%d\n", fmt_date(cur_day * 86400).c_str(), day_ref,
                    day_start_bal, day_min_eq, balance, trades_today);
       double min_pnl = day_min_eq - day_ref;
-      if(min_pnl <= -o.firm_daily_pct * day_ref)
+      if(min_pnl <= -o.firm_daily_pct * (o.firm_daily_on_initial ? o.balance : day_ref))
          n_firm_daily++;
-      if(min_pnl <= -o.lim.daily_loss_pct * day_ref)
+      if(min_pnl <= -o.lim.daily_loss_pct * (o.lim.daily_on_initial ? o.balance : day_ref))
          n_personal_daily++;
      }
 
@@ -310,6 +344,11 @@ struct Engine
      {
       int dir = pos.p.plan.dir;
       double pnl = dir * (price - pos.fill) * lots / spec.tick_size * spec.tick_value_loss - o.commission * lots;
+      if(pos.lots - lots <= 1e-9)
+        {
+         pnl += pos.swap;   // swap is realized with the final close
+         pos.swap = 0;
+        }
       pos.realized += pnl;
       balance += pnl;
       realized_today += pnl;
@@ -433,6 +472,16 @@ struct Engine
       double eq_worst = balance + floating(m, true);
       day_min_eq = std::min(day_min_eq, eq_worst);
       min_equity_ever = std::min(min_equity_ever, eq_worst);
+      // firm max-loss: static floor or equity-peak shield locked at the initial balance (reported only)
+      firm_peak_eq = std::max(firm_peak_eq, balance + floating(m, false));
+      double ffloor = o.balance * (1 - o.firm_max_dd_pct);
+      if(o.firm_dd_trailing)
+         ffloor = std::min(o.balance, std::max(ffloor, firm_peak_eq - o.firm_max_dd_pct * o.balance));
+      if(!firm_dd_breached && eq_worst < ffloor)
+        {
+         firm_dd_breached = true;
+         firm_dd_breach_time = m.t;
+        }
       hwm = std::max(hwm, balance);
       o.lim.peak_equity = std::max(o.lim.peak_equity, balance + floating(m, false));
      }
@@ -446,6 +495,7 @@ struct Engine
       s.day_start_ref = day_ref;
       s.realized_today = realized_today;
       s.open_risk = pos_open_risk();
+      s.open_risk_now = pos_risk_now(m);
       s.pending_risk = pend.active ? pend.risk_money : 0.0;
       s.trades_today = trades_today;
       s.positions = pos.active ? 1 : 0;
@@ -471,9 +521,8 @@ struct Engine
             reject(std::string("CANCEL_") + RB_CancelText(code));
            }
         }
-      // daily limit with existing exposure
-      double day_pnl = realized_today + floating(last, false);
-      if(!day_blocked && day_pnl <= -o.lim.daily_loss_pct * day_ref + 1e-6)
+      // daily limit with existing exposure (equity vs the 00:00 UTC reference, same as the EA)
+      if(!day_blocked && RB_DailyLimitBreached(o.lim, snapshot(last)))
         {
          day_blocked = true;
          if(pend.active)
@@ -505,6 +554,7 @@ struct Engine
          return;
         }
       const M1 &m = m1[m15_first[k + 1]];
+      new_day_if_needed(m);   // the EA rolls the day before evaluating a signal at 00:00
       RBRegimeDecision rd;
       RB_RegimeDecide(e.reg, o.reg, o.cfg.rr, rd);
       if(!rd.allow)
@@ -609,6 +659,7 @@ struct Engine
 
       balance = start_balance = hwm = o.balance;
       min_equity_ever = balance;
+      firm_peak_eq = balance;
       o.lim.initial_balance = o.balance;
       o.lim.peak_equity = o.balance;
       ft = std::fopen(o.out_trades.c_str(), "w");
@@ -629,6 +680,7 @@ struct Engine
             if(m.t < from)
                continue;
             new_day_if_needed(m);
+            apply_swap(m);
             process_minute(m);
             track_equity(m);
            }
@@ -647,6 +699,16 @@ struct Engine
             si++;
            }
         }
+      if(pend.active)
+        {
+         pend.active = false;
+         reject("PENDING_AT_END");
+        }
+      if(pos.active && o.end_close)
+        {
+         const M1 &e = m1.back();
+         close_portion(pos.lots, pos.p.plan.dir == RB_DIR_BULL ? e.bc : e.ac, "END", e.t);
+        }
       if(cur_day >= 0)
          write_day(m1.back());
       std::fclose(ft);
@@ -661,9 +723,10 @@ struct Engine
       s << "signals " << n_signals << " | orders " << n_orders << " | closed trades " << n_trades << "\n";
       s << "final balance " << balance << " | net " << balance - o.balance << " | lowest equity " << min_equity_ever << "\n";
       s << "days breaching personal daily " << o.lim.daily_loss_pct * 100 << "%: " << n_personal_daily
-        << " | firm daily " << o.firm_daily_pct * 100 << "%: " << n_firm_daily
-        << " | firm static max DD " << o.firm_max_dd_pct * 100 << "% breached: "
-        << (min_equity_ever <= o.balance * (1 - o.firm_max_dd_pct) ? "YES" : "no") << "\n";
+        << " | firm daily " << o.firm_daily_pct * 100 << "%" << (o.firm_daily_on_initial ? " of initial" : " of day ref")
+        << ": " << n_firm_daily << " | firm max loss " << o.firm_max_dd_pct * 100 << "% "
+        << (o.firm_dd_trailing ? "(equity-peak shield)" : "(static)") << " breached: "
+        << (firm_dd_breached ? "YES at " + fmt_time(firm_dd_breach_time) : std::string("no")) << "\n";
       s << "rejects / cancels:\n";
       for(const auto &kv : rejects)
          s << "  " << kv.first << " " << kv.second << "\n";
@@ -685,6 +748,8 @@ static void usage()
        "  --out-trades F --out-daily F --out-summary F\n"
        "  --balance 100000 --risk 0.25 --daily 1.0 --open-risk 0.5 --max-dd 4.0 --dd-trailing on|off\n"
        "  --commission 6 --slip-ticks 10 --friday-cutoff 20 --expiry 8\n"
+       "  --swap-long -40 --swap-short 15 ($/lot/night, x3 Wednesday) --end-close on|off --daily-on-initial on|off\n"
+       "  --firm-daily 3 --firm-daily-initial on|off --firm-max 6 --firm-dd-trailing on|off   (reported only)\n"
        "  --rr 6 --fib 0.79 --stop fixed|structural --stop-dist 10 --stop-unit price|points|ticks --buffer 0.30\n"
        "  --wick 0.5 --close-rule body|close --confirm rb|next --zone-age 192\n"
        "  --regime neutral|policy|off   --adaptive on|off\n"
@@ -724,7 +789,21 @@ int main(int argc, char **argv)
       else if(a == "--out-daily") o.out_daily = next();
       else if(a == "--out-summary") o.out_summary = next();
       else if(a == "--balance") o.balance = num();
-      else if(a == "--risk") { o.lim.risk_pct = num() / 100.0; o.scale.base_pct = o.lim.risk_pct; }
+      else if(a == "--risk")
+        {
+         o.lim.risk_pct = num() / 100.0;
+         o.scale.base_pct = o.lim.risk_pct;
+         o.scale.max_pct = std::max(o.scale.max_pct, o.lim.risk_pct);   // never silently cap the base risk
+        }
+      else if(a == "--swap-long") o.swap_long = num();
+      else if(a == "--swap-short") o.swap_short = num();
+      else if(a == "--swap-hour") o.swap_hour = (int)num();
+      else if(a == "--end-close") o.end_close = next() == "on";
+      else if(a == "--daily-on-initial") o.lim.daily_on_initial = next() == "on";
+      else if(a == "--firm-daily") o.firm_daily_pct = num() / 100.0;
+      else if(a == "--firm-daily-initial") o.firm_daily_on_initial = next() == "on";
+      else if(a == "--firm-max") o.firm_max_dd_pct = num() / 100.0;
+      else if(a == "--firm-dd-trailing") o.firm_dd_trailing = next() == "on";
       else if(a == "--max-risk") o.scale.max_pct = num() / 100.0;
       else if(a == "--daily") o.lim.daily_loss_pct = num() / 100.0;
       else if(a == "--open-risk") o.lim.max_open_risk_pct = num() / 100.0;

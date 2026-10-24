@@ -25,6 +25,7 @@ struct RBRiskLimits
    double initial_balance;       // reference for total DD (0 = off)
    bool   trailing_dd;           // floor follows the equity peak (Upcomers Ash "Dynamic Risk Shield")
    double peak_equity;           // highest equity seen (trailing mode)
+   bool   daily_on_initial;      // daily limit amount = pct * initial balance (Ash Turbo: 3% of initial)
    int    max_trades_per_day;    // filled entries per day, 0 = off
    int    max_positions;         // open positions of this EA, 0 = off
    int    max_pending;           // pending orders of this EA, 0 = off
@@ -38,6 +39,7 @@ struct RBRiskLimits
       initial_balance    = 0.0;
       trailing_dd        = false;
       peak_equity        = 0.0;
+      daily_on_initial   = false;
       max_trades_per_day = 3;
       max_positions      = 1;
       max_pending        = 1;
@@ -48,9 +50,10 @@ struct RBRiskSnapshot
   {
    double balance;
    double equity;
-   double day_start_ref;         // max(balance, equity) at server day start
-   double realized_today;        // signed; losses negative
-   double open_risk;             // >= 0
+   double day_start_ref;         // max(balance, equity) at 00:00 UTC (firm reference)
+   double realized_today;        // signed; losses negative (reporting only)
+   double open_risk;             // >= 0, loss from OPEN price to SL (+ costs): exposure / DD caps
+   double open_risk_now;         // >= 0, loss from CURRENT price to SL (+ costs): daily worst case
    double pending_risk;          // >= 0
    int    trades_today;
    int    positions;
@@ -95,6 +98,13 @@ double RB_TotalDDFloor(const RBRiskLimits &lim)
    return MathMin(lim.initial_balance, MathMax(static_floor, trail));
   }
 
+//--- daily loss allowance in money
+double RB_DailyLimitMoney(const RBRiskLimits &lim, const RBRiskSnapshot &s)
+  {
+   double base = (lim.daily_on_initial && lim.initial_balance > 0.0) ? lim.initial_balance : s.day_start_ref;
+   return lim.daily_loss_pct * base;
+  }
+
 //--- 0 = allow, otherwise the denial reason code
 int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double new_risk)
   {
@@ -102,9 +112,10 @@ int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double ne
       return 8;
    if(s.unprotected_position)
       return 1;
-   double daily_limit = lim.daily_loss_pct * s.day_start_ref;
-   double worst_day   = s.realized_today - s.open_risk - s.pending_risk - new_risk;
-   if(worst_day < -daily_limit - 1e-6)
+   // daily: worst-case equity if every stop is hit, measured against the firm's day reference
+   // (equity-based, so overnight floating profit/loss is counted exactly once)
+   double worst_eq = s.equity - s.open_risk_now - s.pending_risk - new_risk;
+   if(worst_eq < s.day_start_ref - RB_DailyLimitMoney(lim, s) - 1e-6)
       return 2;
    if(lim.max_open_risk_pct > 0.0 &&
       s.open_risk + s.pending_risk + new_risk > lim.max_open_risk_pct * s.equity + 1e-6)
@@ -159,12 +170,11 @@ int RB_ChallengeState(double balance, double initial, double target_pct, int act
    return RB_CH_CONTINUE;
   }
 
-//--- true when existing exposure alone already breaches the daily limit
+//--- true when current equity already reached the daily limit below the day reference
 //--- (used to cancel pending orders and stop new ones for the rest of the day)
-bool RB_DailyLimitBreached(const RBRiskLimits &lim, const RBRiskSnapshot &s, double current_day_pnl)
+bool RB_DailyLimitBreached(const RBRiskLimits &lim, const RBRiskSnapshot &s)
   {
-   double daily_limit = lim.daily_loss_pct * s.day_start_ref;
-   return current_day_pnl <= -daily_limit + 1e-6;
+   return s.equity - s.day_start_ref <= -RB_DailyLimitMoney(lim, s) + 1e-6;
   }
 
 #endif

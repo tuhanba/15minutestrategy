@@ -104,3 +104,24 @@ def test_breakeven_management(binary, tmp_path):
     assert t["exit_reason"] == "MGMT_SL"
     assert float(t["exit_price"]) == pytest.approx(101.18 - 0.10)
     assert float(t["mfe_r"]) == pytest.approx((102.40 - 101.13) / 0.5, abs=1e-6)  # best price: bar 13 high
+
+
+def test_swap_and_end_close(binary, tmp_path):
+    # start 18:00 UTC Tuesday: RB closes 20:45, fill in the 20:45 bar, held across the 21:00 rollover,
+    # data ends at 21:15 -> position closed at the last bid with reason END, one night of swap charged
+    bars = BASE + [(102.0, 102.2, 101.0, 101.5), (101.5, 101.6, 101.4, 101.5)]
+    data = tmp_path / "m1.csv"
+    write_m1(data, bars, start=datetime(2024, 1, 2, 18, 0))
+    trades_path = tmp_path / "trades.csv"
+    subprocess.run([str(binary), "--data", str(data), "--from", "2024-01-01", "--to", "2024-02-01", "--regime", "off",
+                    "--stop-dist", "0.5", "--swap-long", "-45", "--swap-short", "-15",
+                    "--out-trades", str(trades_path), "--out-daily", str(tmp_path / "d.csv")],
+                   check=True, capture_output=True, text=True)
+    with trades_path.open() as fh:
+        trades = list(csv.DictReader(fh, delimiter=";"))
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["exit_reason"] == "END"
+    lots = 3.78
+    expected = (101.5 - 101.13) * lots * 100 - 6 * lots - 45 * lots
+    assert float(t["net"]) == pytest.approx(expected, abs=0.01)

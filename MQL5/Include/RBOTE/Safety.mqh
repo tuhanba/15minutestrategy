@@ -11,21 +11,25 @@
 #define RB_ACC_CONTEST 1
 #define RB_ACC_REAL    2
 
-//--- 0 = trading allowed; otherwise reason code
-//--- Real accounts need ALL of: allow_live, confirm_login == login, prop rules verified.
+//--- 0 = trading allowed; otherwise reason code.
+//--- Outside the tester EVERY account (prop evaluations are usually "demo" trade mode) needs
+//--- confirm_login == login, and the account must be known (logged in, connected).
+//--- Real accounts additionally need allow_live and verified prop rules.
 int RB_TradingPermission(bool is_tester, int account_mode, bool allow_live,
-                         long confirm_login, long login, bool prop_verified)
+                         long confirm_login, long login, bool prop_verified, bool connected)
   {
    if(is_tester)
       return 0;
+   if(login <= 0 || !connected)
+      return 5;
+   if(confirm_login <= 0 || confirm_login != login)
+      return 3;
    if(account_mode == RB_ACC_DEMO)
       return 0;
    if(account_mode == RB_ACC_CONTEST)
       return 1;              // treat like real: refuse
    if(!allow_live)
       return 2;
-   if(confirm_login <= 0 || confirm_login != login)
-      return 3;
    if(!prop_verified)
       return 4;
    return 0;
@@ -38,8 +42,9 @@ string RB_PermissionText(int code)
       case 0: return "ALLOWED";
       case 1: return "CONTEST_ACCOUNT_REFUSED";
       case 2: return "LIVE_DISABLED_BY_DEFAULT";
-      case 3: return "LIVE_CONFIRM_LOGIN_MISMATCH";
+      case 3: return "CONFIRM_LOGIN_MISMATCH (set InpLiveConfirmLogin = this account's login)";
       case 4: return "PROP_RULES_NOT_VERIFIED";
+      case 5: return "ACCOUNT_UNKNOWN (not logged in / not connected)";
      }
    return "UNKNOWN";
   }
