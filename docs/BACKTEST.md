@@ -52,3 +52,12 @@ hata görünür hale gelir. Ayrıca bu ortamda MT5 çalışmadığı için gerç
    - Seçim: günlük ihlal olasılığı < %5 olan riskler içinde geçme olasılığı en yüksek olan.
 
 Sonuçlar kabul kriterlerini geçmezse strateji **doğrulanmamış** sayılır. Kriterler sonuca bakılarak gevşetilmez.
+
+## MetaEditor under Wine (Linux)
+
+Ubuntu'nun Wine 9.0 paketi MetaEditor'ün anti-debug kontrolüne takılır ("A debugger has been found running in your system").
+WineHQ'nun Wine 10+/11 sürümüyle çalışır:
+
+1. WineHQ apt kaynağını ekle, `wine-stable` paketlerini indir (sistem Wine'ını değiştirmeden `dpkg -x` ile açılabilir).
+2. Yeni bir `WINEPREFIX` oluştur, MT5'i kur, `terminal64.exe /portable` ile bir kez çalıştır (standart kütüphane `MQL5/` oluşur).
+3. `WINE=<wine11 yolu> MT5=<portable MT5 dizini> tools/compile_mql5.sh`: EA ve test script'ini derler, testleri terminalde başsız çalıştırır, hata varsa sıfırdan farklı kodla çıkar.

@@ -1,6 +1,6 @@
 # RBOTE — XAUUSD M15 PD Array + Rejection Block + OTE 0.79 (MQL5 EA)
 
-Durum: **EA yazıldı, saf mantık testli. MetaEditor derlemesi ve backtest henüz YAPILMADI.**
+Durum: **EA MetaEditor'de 0 hata/0 uyarıyla derleniyor, MQL5 testleri MT5 içinde geçiyor. Gerçek veriyle backtest devam ediyor.**
 Performans iddiası yok. Varsayılan ayarlar gerçek hesapta çalışmayı reddeder.
 
 ## Strateji (tek cümle)
@@ -188,7 +188,7 @@ Ayrıntılar `docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md` içinde.
 
 ## Bilinen sınırlamalar
 
-- **MQL5 derlemesi doğrulanmadı.** MetaEditor bu bulut ortamında Wine altında kurulabildi, ama kopya koruması "A debugger has been found running in your system" hatası verip kapandı. İlk derlemede çıkan hatalar düzeltilmelidir. Saf mantık dosyaları g++ ile `-Wall -Wextra -Werror` altında temiz derleniyor ve testleri geçiyor. MT5'e bağlı kod (EA, MT5Bridge, Journal) hiç derlenmedi ve çalıştırılmadı.
+- **MQL5 derlemesi doğrulandı** (2026-10-24, MetaEditor build 6283, WineHQ Wine 11): EA ve test script'i 0 hata / 0 uyarı; `RBOTE_Tests` MT5 terminalinde 225/225 geçti. Linux'ta tekrar: `tools/compile_mql5.sh` (bkz. docs/BACKTEST.md). EA henüz bir hesapta veya Strategy Tester'da çalıştırılmadı.
 - Ekonomik takvim filtresi Strategy Tester'da çalışmaz (MT5 kısıtı). Backtest haber filtresiz yapılır.
 - Netting hesaplarda aynı semboldeki başka pozisyonlarla birleşme olabilir. Hedging hesap önerilir.
 - `trades.csv` yalnız kapanmış işlemleri içerir. Gün içi floating zarar analizde yoktur. Tester raporundaki equity DD ayrıca okunmalıdır.

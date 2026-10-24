@@ -4,7 +4,7 @@
 //| Drag onto any chart; results are printed to the Experts tab.     |
 //+------------------------------------------------------------------+
 #property script_show_inputs
-#property version "0.10"
+#property version "1.00"
 
 #include <RBOTE/Tests/TestCases.mqh>
 

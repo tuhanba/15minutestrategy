@@ -8,7 +8,7 @@
 //| user; prop-firm limits are NOT assumed.                          |
 //+------------------------------------------------------------------+
 #property copyright "RBOTE"
-#property version   "0.10"
+#property version   "1.00"
 #property description "M15 PD Array + Rejection Block + OTE 0.79. Demo/backtest by default."
 
 #include <Trade/Trade.mqh>
@@ -1126,6 +1126,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 
    //--- outcome explanation: what happened and under which conditions
    RBFeatures feat;
+   ZeroMemory(feat);
    for(int d = 0; d < RB_FEAT_DIMS; d++)
       feat.b[d] = (int)g_meta.Get(pos, "f" + IntegerToString(d));
    string cond = "";
