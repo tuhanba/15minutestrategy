@@ -660,6 +660,23 @@ void Test_RiskGuard(CRBTest &t)
    lim.initial_balance = 100000.0;
    s.equity = 95400.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 4, "total DD floor 95000");
+   // trailing floor (Ash): peak 103000 -> floor 99000; locked at 100000 once the peak reaches 104000
+   lim.trailing_dd = true;
+   lim.max_total_dd_pct = 0.04;
+   lim.peak_equity = 103000.0;
+   t.Near(RB_TotalDDFloor(lim), 99000.0, 1e-9, "trailing floor = peak - 4% of initial");
+   lim.peak_equity = 110000.0;
+   t.Near(RB_TotalDDFloor(lim), 100000.0, 1e-9, "trailing floor locks at the initial balance");
+   lim.peak_equity = 99000.0;
+   t.Near(RB_TotalDDFloor(lim), 96000.0, 1e-9, "trailing floor never below the static floor");
+   lim.peak_equity = 103000.0;
+   s.equity = 99600.0;
+   s.open_risk = 0.0;
+   s.pending_risk = 0.0;
+   s.realized_today = 0.0;
+   t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "99600 - 250 above trailing floor 99000");
+   t.Check(RB_CheckNewOrder(lim, s, 700.0) == 4, "99600 - 700 below trailing floor 99000");
+   lim.trailing_dd = false;
    s.equity = -1.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 8, "bad account state");
   }

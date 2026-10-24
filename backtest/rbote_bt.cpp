@@ -434,6 +434,7 @@ struct Engine
       day_min_eq = std::min(day_min_eq, eq_worst);
       min_equity_ever = std::min(min_equity_ever, eq_worst);
       hwm = std::max(hwm, balance);
+      o.lim.peak_equity = std::max(o.lim.peak_equity, balance + floating(m, false));
      }
 
    // ------------------------------------------------------------------
@@ -609,6 +610,7 @@ struct Engine
       balance = start_balance = hwm = o.balance;
       min_equity_ever = balance;
       o.lim.initial_balance = o.balance;
+      o.lim.peak_equity = o.balance;
       ft = std::fopen(o.out_trades.c_str(), "w");
       fd = std::fopen(o.out_daily.c_str(), "w");
       std::fprintf(ft, "open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;"
@@ -681,7 +683,7 @@ static void usage()
        "rbote_bt --data FILE [--data FILE...] [options]\n"
        "  --from YYYY-MM-DD --to YYYY-MM-DD   period (to exclusive)\n"
        "  --out-trades F --out-daily F --out-summary F\n"
-       "  --balance 100000 --risk 0.25 --daily 1.0 --open-risk 0.5 --max-dd 4.0\n"
+       "  --balance 100000 --risk 0.25 --daily 1.0 --open-risk 0.5 --max-dd 4.0 --dd-trailing on|off\n"
        "  --commission 6 --slip-ticks 10 --friday-cutoff 20 --expiry 8\n"
        "  --rr 6 --fib 0.79 --stop fixed|structural --stop-dist 10 --stop-unit price|points|ticks --buffer 0.30\n"
        "  --wick 0.5 --close-rule body|close --confirm rb|next --zone-age 192\n"
@@ -727,6 +729,7 @@ int main(int argc, char **argv)
       else if(a == "--daily") o.lim.daily_loss_pct = num() / 100.0;
       else if(a == "--open-risk") o.lim.max_open_risk_pct = num() / 100.0;
       else if(a == "--max-dd") o.lim.max_total_dd_pct = num() / 100.0;
+      else if(a == "--dd-trailing") o.lim.trailing_dd = next() == "on";
       else if(a == "--commission") o.commission = num();
       else if(a == "--slip-ticks") o.slip_ticks = num();
       else if(a == "--friday-cutoff") o.friday_cutoff = (int)num();

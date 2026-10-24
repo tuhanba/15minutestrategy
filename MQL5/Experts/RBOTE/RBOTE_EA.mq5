@@ -60,7 +60,8 @@ input group "Risk (test values, NOT prop-firm rules)"
 input double InpRiskPct            = 0.25;    // Risk per trade, % of min(balance, equity)
 input double InpDailyLossPct       = 1.0;     // Personal daily loss limit, % of day-start ref
 input double InpMaxOpenRiskPct     = 0.5;     // Open + pending + new risk cap, % of equity
-input double InpMaxTotalDDPct      = 4.0;     // Total drawdown floor, % of initial balance (firm: 6% static)
+input double InpMaxTotalDDPct      = 4.0;     // Personal total drawdown, % of initial balance (Ash firm: 6%)
+input bool   InpTrailingDD         = true;    // Floor follows the equity peak, locks at initial (Ash rule)
 input double InpInitialBalance     = 0.0;     // Initial balance for total DD (0 = balance at first start)
 input int    InpMaxTradesPerDay    = 3;       // Max entries per server day (0 = off)
 input int    InpMaxPositions       = 1;       // Max open positions of this EA (0 = off)
@@ -217,6 +218,7 @@ void BuildConfig(void)
    g_lim.daily_loss_pct     = InpDailyLossPct / 100.0;
    g_lim.max_open_risk_pct  = InpMaxOpenRiskPct / 100.0;
    g_lim.max_total_dd_pct   = InpMaxTotalDDPct / 100.0;
+   g_lim.trailing_dd        = InpTrailingDD;
    g_lim.max_trades_per_day = InpMaxTradesPerDay;
    g_lim.max_positions      = InpMaxPositions;
    g_lim.max_pending        = InpMaxPending;
@@ -293,8 +295,12 @@ void GvSet(const string name, double v) { GlobalVariableSet(GvKey(name), v); }
 void UpdateHighWaterMark(void)
   {
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
    if(bal > GvGet("hwm", 0.0))
       GvSet("hwm", bal);
+   if(eq > GvGet("eq_peak", 0.0))
+      GvSet("eq_peak", eq);
+   g_lim.peak_equity = MathMax(GvGet("eq_peak", eq), g_lim.initial_balance);
   }
 
 void LoadEdgeStats(void)
@@ -921,6 +927,7 @@ void OnTick(void)
      {
       ManagePendingOnTick(tick.bid, tick.ask);
       UpdateExcursions(tick.bid, tick.ask);
+      UpdateHighWaterMark();
      }
 
    datetime t = iTime(_Symbol, TF, 0);

@@ -31,7 +31,7 @@ OOS = ("2024-01-01", "2026-10-24")
 
 BASE = ["--stop", "fixed", "--stop-dist", "10", "--stop-unit", "price", "--rr", "6",
         "--regime", "neutral", "--adaptive", "off", "--risk", "0.25", "--daily", "1.0",
-        "--open-risk", "0.5", "--max-dd", "4.0", "--commission", "6", "--slip-ticks", "10",
+        "--open-risk", "0.5", "--max-dd", "4.0", "--dd-trailing", "on", "--commission", "6", "--slip-ticks", "10",
         "--friday-cutoff", "20"]
 
 VARIANTS = {
@@ -196,6 +196,7 @@ def main(argv=None) -> int:
         if not any(d.trades for d in days):
             out.append("no trades")
             continue
+        out.append(ps.report(days, "ash", [0.001, 0.0015, 0.002, 0.0025, 0.0035, 0.005], args.mc_runs, 11))
         for prog in ("phoenix", "thunderbolt"):
             out.append(ps.report(days, prog, [0.0025, 0.00375, 0.005, 0.0075, 0.01], args.mc_runs, 11))
 

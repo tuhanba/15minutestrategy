@@ -23,6 +23,8 @@ struct RBRiskLimits
    double max_open_risk_pct;     // open + pending + new, fraction of equity (0.005)
    double max_total_dd_pct;      // from initial balance, 0 = off
    double initial_balance;       // reference for total DD (0 = off)
+   bool   trailing_dd;           // floor follows the equity peak (Upcomers Ash "Dynamic Risk Shield")
+   double peak_equity;           // highest equity seen (trailing mode)
    int    max_trades_per_day;    // filled entries per day, 0 = off
    int    max_positions;         // open positions of this EA, 0 = off
    int    max_pending;           // pending orders of this EA, 0 = off
@@ -34,6 +36,8 @@ struct RBRiskLimits
       max_open_risk_pct  = 0.005;
       max_total_dd_pct   = 0.0;
       initial_balance    = 0.0;
+      trailing_dd        = false;
+      peak_equity        = 0.0;
       max_trades_per_day = 3;
       max_positions      = 1;
       max_pending        = 1;
@@ -80,6 +84,17 @@ string RB_GuardText(int code)
    return "UNKNOWN";
   }
 
+//--- total drawdown floor. Static: initial*(1-dd). Trailing: peak - dd*initial,
+//--- never below the static floor and locked at the initial balance (Ash challenge rule).
+double RB_TotalDDFloor(const RBRiskLimits &lim)
+  {
+   double static_floor = lim.initial_balance * (1.0 - lim.max_total_dd_pct);
+   if(!lim.trailing_dd)
+      return static_floor;
+   double trail = lim.peak_equity - lim.max_total_dd_pct * lim.initial_balance;
+   return MathMin(lim.initial_balance, MathMax(static_floor, trail));
+  }
+
 //--- 0 = allow, otherwise the denial reason code
 int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double new_risk)
   {
@@ -96,7 +111,7 @@ int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double ne
       return 3;
    if(lim.max_total_dd_pct > 0.0 && lim.initial_balance > 0.0)
      {
-      double floor_eq = lim.initial_balance * (1.0 - lim.max_total_dd_pct);
+      double floor_eq = RB_TotalDDFloor(lim);
       if(s.equity - s.open_risk - s.pending_risk - new_risk < floor_eq - 1e-6)
          return 4;
      }

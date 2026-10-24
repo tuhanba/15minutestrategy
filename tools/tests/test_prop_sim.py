@@ -72,3 +72,13 @@ def test_custom_program_cli(tmp_path):
     assert rc == 0
     text = out.read_text()
     assert "Test 2-step" in text and "| 0.500% | Monte Carlo (50) | 100.0%" in text
+
+
+def test_ash_two_percent_target():
+    # Ash: 2% target in one phase; one +6R trade at 0.35% risk = +2.1% -> passes on day 1 with 1 trade
+    days = days_from([[(6.0, -0.1)]] * 3)
+    out = ps.attempt(it(days), ps.PROGRAMS["ash"], 0.0035)
+    assert out.passed and out.trades == 1 and out.min_phase_trades == 1
+    # daily 3%: one trade at 1% risk dipping -3.2R breaches
+    out = ps.attempt(it(days_from([[(1.0, -3.2)]])), ps.PROGRAMS["ash"], 0.01)
+    assert out.reason == "daily"
