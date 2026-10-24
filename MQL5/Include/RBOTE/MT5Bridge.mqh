@@ -122,15 +122,13 @@ double RB_LossBetween(const string sym, ENUM_ORDER_TYPE type, double volume, dou
    return p < 0.0 ? -p : 0.0;
   }
 
-//--- start of the current server day
-datetime RB_DayStart(datetime t)
+//--- server time of the last 00:00 UTC (Upcomers resets the daily drawdown at 00:00 UTC).
+//--- offset_sec = server time - UTC.
+datetime RB_DayStart(datetime server_t, int offset_sec)
   {
-   MqlDateTime dt;
-   TimeToStruct(t, dt);
-   dt.hour = 0;
-   dt.min  = 0;
-   dt.sec  = 0;
-   return StructToTime(dt);
+   long utc = (long)server_t - offset_sec;
+   long utc0 = utc - (utc % 86400);
+   return (datetime)(utc0 + offset_sec);
   }
 
 //+------------------------------------------------------------------+
@@ -138,7 +136,7 @@ datetime RB_DayStart(datetime t)
 //| the account are included (any magic, any symbol) and treated as |
 //| fully correlated.                                                |
 //+------------------------------------------------------------------+
-bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start_ref,
+bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start_ref, int offset_sec,
                       RBRiskSnapshot &s, string &err)
   {
    s.balance              = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -153,7 +151,7 @@ bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start
    s.unprotected_position = false;
    err = "";
 
-   datetime day0 = RB_DayStart(TimeCurrent());
+   datetime day0 = RB_DayStart(TimeCurrent(), offset_sec);
    if(!HistorySelect(day0, TimeCurrent() + 60))
      {
       err = "HistorySelect failed";

@@ -60,19 +60,21 @@ input group "Risk (test values, NOT prop-firm rules)"
 input double InpRiskPct            = 0.25;    // Risk per trade, % of min(balance, equity)
 input double InpDailyLossPct       = 1.0;     // Personal daily loss limit, % of day-start ref
 input double InpMaxOpenRiskPct     = 0.5;     // Open + pending + new risk cap, % of equity
-input double InpMaxTotalDDPct      = 0.0;     // Total drawdown floor, % of initial balance (0 = off)
+input double InpMaxTotalDDPct      = 4.0;     // Total drawdown floor, % of initial balance (firm: 6% static)
 input double InpInitialBalance     = 0.0;     // Initial balance for total DD (0 = balance at first start)
 input int    InpMaxTradesPerDay    = 3;       // Max entries per server day (0 = off)
 input int    InpMaxPositions       = 1;       // Max open positions of this EA (0 = off)
 input int    InpMaxPending         = 1;       // Max pending orders of this EA (0 = off)
 input double InpCommissionPerLotRT = 0.0;     // Commission per lot, round turn (account currency)
 input double InpSlippageTicks      = 10.0;    // Slippage allowance on the stop (ticks)
-input double InpMaxLots            = 0.0;     // Hard lot cap (0 = broker max)
+input double InpMaxLots            = 50.0;    // Hard lot cap (Upcomers: 50 lots)
 
 input group "Time / news filters"
-input int    InpFridayCutoffHour   = 20;      // Friday: no new orders, cancel pending from this server hour (-1 off)
-input int    InpBlockFromHour      = -1;      // Daily block window start, server hour (-1 off)
-input int    InpBlockToHour        = -1;      // Daily block window end, server hour (exclusive)
+input int    InpServerUtcOffset    = -99;     // Server time - UTC in hours (-99 = auto live; tester uses 2 unless set)
+input int    InpFridayCutoffHour   = 20;      // Friday: no new orders, cancel pending from this UTC hour (-1 off)
+input int    InpBlockFromHour      = -1;      // Daily block window start, UTC hour (-1 off)
+input int    InpBlockToHour        = -1;      // Daily block window end, UTC hour (exclusive)
+input int    InpInactivityWarnDays = 25;      // Warn when no trade closed for N days (Upcomers fails at 35)
 input bool   InpNewsFilter         = true;    // Block new orders around high-impact news (live/demo only)
 input string InpNewsCurrency       = "USD";   // Calendar currency
 input int    InpNewsMinutesBefore  = 15;      // Minutes before the event
@@ -136,6 +138,20 @@ const ENUM_TIMEFRAMES TF    = PERIOD_M15;
 
 //+------------------------------------------------------------------+
 string DirText(int dir) { return dir == RB_DIR_BULL ? "BUY" : "SELL"; }
+
+//--- server time minus UTC, in seconds. Day boundaries, sessions and the Friday cutoff are UTC.
+//--- In the Strategy Tester TimeGMT() equals server time, so the offset must come from the input.
+int ServerOffsetSec(void)
+  {
+   if(InpServerUtcOffset != -99)
+      return InpServerUtcOffset * 3600;
+   if((bool)MQLInfoInteger(MQL_TESTER))
+      return 2 * 3600;
+   long diff = (long)TimeTradeServer() - (long)TimeGMT();
+   return (int)(MathRound(diff / 900.0) * 900);
+  }
+
+datetime ServerToUtc(datetime t) { return (datetime)((long)t - ServerOffsetSec()); }
 
 void BuildConfig(void)
   {
@@ -231,7 +247,7 @@ double InitialBalance(void)
 //--- After a restart the day-start balance is rebuilt from today's closed deals.
 void UpdateDay(void)
   {
-   datetime d = RB_DayStart(TimeCurrent());
+   datetime d = RB_DayStart(TimeCurrent(), ServerOffsetSec());
    if(d == g_day)
       return;
    string k = "RBOTE." + IntegerToString(InpMagic) + ".dayref." + IntegerToString((long)d);
@@ -358,6 +374,26 @@ void UpdateExcursions(double bid, double ask)
       if(exc < g_meta.Get(id, "mae"))
          g_meta.Set(id, "mae", exc);
      }
+  }
+
+//--- Upcomers fails an account after 35 days without a closed trade: warn early, once per day
+void CheckInactivity(void)
+  {
+   if(InpInactivityWarnDays <= 0)
+      return;
+   if(!GlobalVariableCheck(GvKey("last_close")))
+      GvSet("last_close", (double)TimeCurrent());
+   double days = (TimeCurrent() - (datetime)GvGet("last_close", (double)TimeCurrent())) / 86400.0;
+   if(days < InpInactivityWarnDays)
+      return;
+   datetime today = RB_DayStart(TimeCurrent(), ServerOffsetSec());
+   if((datetime)GvGet("inactivity_warned", 0.0) == today)
+      return;
+   GvSet("inactivity_warned", (double)today);
+   string msg = StringFormat("RBOTE: no closed trade for %.0f days (prop rule: 35)", days);
+   g_log.Log("INACTIVITY_WARNING", "", msg, "consider a manual minimum trade per firm rules");
+   if(!g_tester)
+      SendNotification(msg);
   }
 
 //+------------------------------------------------------------------+
@@ -562,7 +598,7 @@ void ManagePendingOnBar(const MqlRates &rates[], int n)
 bool TimeBlocked(string &why)
   {
    MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   TimeToStruct(ServerToUtc(TimeCurrent()), dt);
    if(InpFridayCutoffHour >= 0 && ((dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) || dt.day_of_week == 6 || dt.day_of_week == 0))
      {
       why = "FRIDAY_CUTOFF";
@@ -679,7 +715,7 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    double pct = RB_ProfitScaledPct(g_scale, g_lim.initial_balance, bal, GvGet("hwm", bal), ref_eq,
                                    (int)GvGet("consec_losses", 0.0), scale_why);
    MqlDateTime sdt;
-   TimeToStruct(sig.confirm_time + PeriodSeconds(TF), sdt);   // decision time = close of the confirming bar
+   TimeToStruct(ServerToUtc(sig.confirm_time + PeriodSeconds(TF)), sdt);   // decision time (UTC) = close of the confirming bar
    RBFeatures feat;
    RB_MakeFeatures(sig.dir, sig.zone_type, reg.valid ? reg.vol_class : RB_VOL_NORMAL, reg.ranging, sdt.hour, feat);
    string edge_why;
@@ -726,7 +762,7 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    //--- account-wide guard
    RBRiskSnapshot snap;
    string err;
-   if(!RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, snap, err))
+   if(!RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, ServerOffsetSec(), snap, err))
      {
       g_log.Log("SIGNAL_REJECTED", id, pctx, "SNAPSHOT_FAILED " + err);
       return;
@@ -811,12 +847,13 @@ void OnNewBar(void)
    //--- pending order maintenance always runs on closed bars
    ManagePendingOnBar(rates, n);
    Reconcile("BAR");
+   CheckInactivity();
    UpdateHighWaterMark();
 
    //--- day limit: existing exposure already at the limit -> cancel pending, block the day
    RBRiskSnapshot snap;
    string err;
-   if(RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, snap, err))
+   if(RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, ServerOffsetSec(), snap, err))
      {
       double day_pnl = snap.realized_today + (snap.equity - snap.balance);
       if(RB_DailyLimitBreached(g_lim, snap, day_pnl))
@@ -957,7 +994,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    RBTradeRow row;
    row.open_time       = t_open;
    row.close_time      = t_close;
-   row.signal_time     = (datetime)g_meta.Get(pos, "bar") + PeriodSeconds(TF);
+   row.signal_time     = ServerToUtc((datetime)g_meta.Get(pos, "bar") + PeriodSeconds(TF));
    row.dir             = dir;
    row.planned_entry   = g_meta.Get(pos, "entry");
    row.fill_price      = fill;
@@ -985,7 +1022,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    row.wick_ratio      = g_meta.Get(pos, "wr");
    row.rb_range_atr    = g_meta.Get(pos, "rba");
    row.stop_atr        = g_meta.Get(pos, "sta");
-   row.fill_delay_bars = (int)((t_open - row.signal_time) / PeriodSeconds(TF));
+   row.fill_delay_bars = (int)((ServerToUtc(t_open) - row.signal_time) / PeriodSeconds(TF));
    row.risk_pct        = g_meta.Get(pos, "pct");
    row.edge_mult       = g_meta.Get(pos, "emul");
    row.scale_reason    = ScaleReasonText((int)g_meta.Get(pos, "srs"));
@@ -1011,6 +1048,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    g_stats.Add(feat, rr);
    SaveEdgeStats();
    GvSet("consec_losses", net < 0.0 ? GvGet("consec_losses", 0.0) + 1.0 : 0.0);
+   GvSet("last_close", (double)TimeCurrent());
    UpdateHighWaterMark();
    g_meta.Delete(pos);
   }

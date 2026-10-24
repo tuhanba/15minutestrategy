@@ -12,6 +12,7 @@
 #include "../Safety.mqh"
 #include "../Regime.mqh"
 #include "../Adaptive.mqh"
+#include "../TradeMgmt.mqh"
 
 #ifndef __MQL5__
 #include <cstdio>
@@ -1000,6 +1001,37 @@ void Test_Adaptive(CRBTest &t)
    t.Near(RB_ExcursionR(RB_DIR_BEAR, 2657.90, 2662.90, 10.0), -0.5, 1e-9, "short adverse excursion in R");
   }
 
+//--- trade management (breakeven / trailing / partial) -------------
+void Test_TradeMgmt(CRBTest &t)
+  {
+   RBMgmtCfg c;
+   c.Defaults();
+   // all off -> stop unchanged
+   t.Near(RB_MgmtStop(RB_DIR_BULL, 2652.10, 2642.10, 10.0, 2700.0, c, 0.01), 2642.10, 1e-9, "management off -> SL unchanged");
+   c.be_at_r = 2.0;
+   c.be_offset_r = 0.1;
+   t.Near(RB_MgmtStop(RB_DIR_BULL, 2652.10, 2642.10, 10.0, 2671.0, c, 0.01), 2642.10, 1e-9, "+1.89R < 2R -> no BE");
+   t.Near(RB_MgmtStop(RB_DIR_BULL, 2652.10, 2642.10, 10.0, 2672.10, c, 0.01), 2653.10, 1e-9, "+2R -> SL entry+0.1R");
+   t.Near(RB_MgmtStop(RB_DIR_BEAR, 2657.90, 2667.90, 10.0, 2637.90, c, 0.01), 2656.90, 1e-9, "bear +2R -> SL entry-0.1R");
+   // trailing
+   RBMgmtCfg tc;
+   tc.Defaults();
+   tc.trail_start_r = 3.0;
+   tc.trail_dist_r = 1.5;
+   t.Near(RB_MgmtStop(RB_DIR_BULL, 2652.10, 2642.10, 10.0, 2685.00, tc, 0.01), 2670.00, 1e-9, "+3.29R -> trail 1.5R below best");
+   // never widen: current SL already better than the trail level
+   t.Near(RB_MgmtStop(RB_DIR_BULL, 2652.10, 2675.00, 10.0, 2685.00, tc, 0.01), 2675.00, 1e-9, "trail never loosens");
+   // partial volume
+   RBMgmtCfg pc;
+   pc.Defaults();
+   pc.partial_at_r = 3.0;
+   pc.partial_frac = 0.5;
+   t.Near(RB_MgmtPartialVolume(2.33, pc, 0.01, 0.01), 1.16, 1e-9, "half of 2.33 -> 1.16");
+   t.Near(RB_MgmtPartialVolume(0.01, pc, 0.01, 0.01), 0.0, 1e-12, "too small to split -> no partial");
+   t.Near(RB_MgmtPartialPrice(RB_DIR_BEAR, 2657.90, 10.0, pc), 2627.90, 1e-9, "bear partial price at 3R");
+   t.Near(RB_MgmtExcursionR(RB_DIR_BEAR, 2657.90, 2627.90, 10.0), 3.0, 1e-9, "bear excursion R");
+  }
+
 //--- entry point ----------------------------------------------------
 void RB_RunAllTests(CRBTest &t)
   {
@@ -1015,6 +1047,7 @@ void RB_RunAllTests(CRBTest &t)
    Test_Lookahead(t);
    Test_Regime(t);
    Test_Adaptive(t);
+   Test_TradeMgmt(t);
    RB_TestPrint("RBOTE tests: passed=" + IntegerToString(t.passed) + " failed=" + IntegerToString(t.failed));
   }
 
