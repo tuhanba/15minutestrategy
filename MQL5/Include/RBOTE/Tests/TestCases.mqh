@@ -937,6 +937,8 @@ void Test_Adaptive(CRBTest &t)
    // no profit -> base
    t.Near(RB_ProfitScaledPct(sc, 100000, 100000, 100000, 100000, 0, why), 0.0025, 1e-12, "no profit -> base 0.25%");
    t.Near(RB_ProfitScaledPct(sc, 100000, 97000, 100000, 97000, 0, why), 0.0025, 1e-12, "in loss -> base, never below");
+   t.Near(RB_ProfitScaledPct(sc, 100000, 99000, 100000, 99000, 0, why), 0.0025, 1e-12, "small loss, no brake -> still base, never below");
+   t.Check(why == "BASE", "small loss reason");
    // +5000 profit, 2% share -> +100 -> 0.25% + 100/105000
    double p = RB_ProfitScaledPct(sc, 100000, 105000, 105000, 105000, 0, why);
    t.Near(p, 0.0025 + 100.0 / 105000.0, 1e-12, "+5000 profit -> extra 100 risk");

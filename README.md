@@ -102,7 +102,7 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 
 1. MT5'te **File → Open Data Folder**. Bu repodaki `MQL5/` klasörünün içeriğini açılan `MQL5/` klasörüne kopyala (Experts, Include, Scripts, Presets).
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
-3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=202 failed=0` ve `ALL PASSED` görünmeli.
+3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=204 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
    - `InpStopUnit` seçilmezse EA başlamaz. `PRICE` seçmek, "10" değerini 10.00 fiyat birimi kabul etmek demektir.
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
@@ -118,7 +118,7 @@ Aksi halde `INIT_REFUSED` verir. Contest hesapları her durumda reddedilir.
 ## Testler
 
 ```bash
-make test                         # g++: ortak MQL5 testleri (202 kontrol)
+make test                         # g++: ortak MQL5 testleri (204 kontrol)
 python3 -m pytest -q tools/tests  # analiz aracı testleri
 ```
 
