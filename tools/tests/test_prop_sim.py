@@ -61,3 +61,14 @@ def test_report_runs():
     days = days_from([[(6.0, -0.3)], [], [(-1.0, -1.0)], [(-1.0, -1.0)]] * 20)
     text = ps.report(days, "phoenix", [0.0025, 0.005], runs=200, seed=1)
     assert "Phoenix" in text and "Decision rule" in text
+
+
+def test_custom_program_cli(tmp_path):
+    t = tmp_path / "t.csv"
+    t.write_text("close_time;r;mae_r\n" + "\n".join(f"2024.01.{d:02d} 10:00;6.0;-0.2" for d in range(1, 29)) + "\n")
+    out = tmp_path / "rep.md"
+    rc = ps.main([str(t), "--program", "custom", "--name", "Test 2-step", "--targets", "8,5", "--daily-pct", "5",
+                  "--max-pct", "10", "--runs", "50", "--risks", "0.5", "-o", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert "Test 2-step" in text and "| 0.500% | Monte Carlo (50) | 100.0%" in text

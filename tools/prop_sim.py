@@ -212,7 +212,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("trades", type=Path)
     ap.add_argument("--daily", type=Path, help="daily.csv from the backtester (adds days without trades)")
-    ap.add_argument("--program", choices=sorted(PROGRAMS), action="append")
+    ap.add_argument("--program", choices=sorted(PROGRAMS) + ["custom"], action="append")
+    ap.add_argument("--name", default="Custom program", help="custom: display name")
+    ap.add_argument("--targets", help="custom: profit target %% per phase, e.g. 8,5")
+    ap.add_argument("--daily-pct", type=float, help="custom: daily loss %%")
+    ap.add_argument("--max-pct", type=float, help="custom: max loss %%")
+    ap.add_argument("--trailing", action="store_true", help="custom: trailing max loss locked at the initial balance")
+    ap.add_argument("--inactivity-days", type=int, default=35)
     ap.add_argument("--risks", default="0.25,0.375,0.5,0.75,1.0", help="risk per trade in %%")
     ap.add_argument("--runs", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=11)
@@ -223,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
         print("no data", file=sys.stderr)
         return 2
     risks = [float(x) / 100.0 for x in args.risks.split(",")]
+    if args.program and "custom" in args.program:
+        if not (args.targets and args.daily_pct and args.max_pct):
+            print("custom program needs --targets --daily-pct --max-pct", file=sys.stderr)
+            return 2
+        PROGRAMS["custom"] = Program(args.name, tuple(float(x) / 100.0 for x in args.targets.split(",")),
+                                     args.daily_pct / 100.0, args.max_pct / 100.0, args.trailing, args.inactivity_days)
     text = "# Upcomers challenge simulation\n\n" + "\n".join(
         report(days, p, risks, args.runs, args.seed) for p in (args.program or ["phoenix", "thunderbolt"]))
     if args.output:
