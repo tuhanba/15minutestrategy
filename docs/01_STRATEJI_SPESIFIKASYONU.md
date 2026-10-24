@@ -215,3 +215,54 @@ Kabul kriterleri (OOS):
 - yılların ≥ %60'ı pozitif
 
 Biri sağlanmazsa sonuç **FAIL** olur.
+
+## 12. Volatilite ve piyasa rejimi (v0.3)
+
+Kaynak strateji volatilite veya yatay piyasa için **kural vermiyor**. Aşağıdakiler ölçülebilir tanımlar ve
+ayarlanabilir politikalardır. Hangi politikanın doğru olduğuna backtest'teki rejim kırılımına bakılarak karar verilir.
+
+### 12.1 Ölçüm (yalnız kapanmış barlar, sinyali onaylayan bar `k`)
+
+```
+VR (volatilite oranı) = ATR14(M15)[k] / ortalama(ATR14, son 960 bar ≈ 10 işlem günü)
+ER (verimlilik oranı)  = |Close[k] − Close[k−32]| / Σ |Close[i] − Close[i−1]|   (32 bar = 8 saat)
+```
+
+| Sınıf | Koşul | Anlamı |
+|---|---|---|
+| EXTREME | VR ≥ 2.50 | Haber patlaması, ani çöküş/yükseliş |
+| HIGH | VR ≥ 1.50 | Bugün altın normalden belirgin hareketli |
+| LOW | VR ≤ 0.70 | Sakin, dar aralık |
+| NORMAL | diğer | |
+| +RANGE | ER ≤ 0.20 | Yatay / testere piyasa (volatilite sınıfına ek etiket) |
+
+### 12.2 Politika (EA varsayılanları = koruyucu VARSAYIM)
+
+| Rejim | İşlem | Risk | RR | Gerekçe |
+|---|---|---|---|---|
+| NORMAL | evet | ×1.0 | 6R | Kaynak kurgu |
+| HIGH | evet | ×0.5 | 6R | Spread/kayma artar. Sabit stop gürültüye göre küçük kalır. Büyük RB'ler zaten `SL_INSIDE_RB` ile reddedilir |
+| EXTREME | **hayır** | — | — | Fiyat boşlukları, spread patlaması, stop'un kaymayla aşılması |
+| LOW | evet | ×0.5 | 6R | 6R hedefe ulaşmak için hareket yetmeyebilir |
+| +RANGE | evet | ×0.5 | 6R | Yatay piyasada 6R hedef ihtimali düşer |
+| Veri yetersiz | **hayır** | — | — | Ölçülemeyen rejimde işlem yok (fail-safe) |
+
+Birleştirme kuralı:
+- EXTREME her şeyi geçersiz kılar.
+- Volatilite veya range politikasından biri "hayır" derse işlem açılmaz.
+- Risk çarpanı en düşük olandır.
+- RR override önce range politikasından, sonra volatilite politikasından alınır.
+
+Her rejim için işlem açılıp açılmayacağı, risk çarpanı ve RR override EA girdisidir.
+
+### 12.3 Doğrulama sırası
+
+1. **Ölçüm koşusu:** `RBOTE_6R_fixed10price.set`. Rejim yalnız loglanır, her rejimde tam riskle işlem açılır.
+2. `analyze_trades.py` raporundaki "EA regime" tablosundan her rejimin IS expectancy değeri okunur.
+3. Politika yalnız IS verisine göre seçilir:
+   - expectancy'si negatif olan rejim → `InpTrade...=false`
+   - pozitif ama oynak olan rejim → çarpan
+4. Seçilen politika (ör. `RBOTE_6R_fixed10price_regime.set`) OOS'ta **bir kez** çalıştırılır ve ölçüm koşusuyla karşılaştırılır.
+5. Politika OOS'ta ölçüm koşusundan iyi değilse kullanılmaz.
+
+Bir rejimde 30'dan az işlem varsa o rejim için karar verilmez. Varsayılan politika korunur.

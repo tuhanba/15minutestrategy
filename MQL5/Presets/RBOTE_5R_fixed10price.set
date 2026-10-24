@@ -22,3 +22,13 @@ InpNewsFilter=true
 InpJournal=true
 ; SET the broker round-turn commission per lot before running (0 = ignored in lot sizing)
 InpCommissionPerLotRT=0.0
+; Regime: classify and log only (source baseline) - every regime traded at full risk
+InpRegimeEnabled=true
+InpTradeHighVol=true
+InpRiskMultHighVol=1.0
+InpTradeExtremeVol=true
+InpTradeLowVol=true
+InpRiskMultLowVol=1.0
+InpTradeRange=true
+InpRiskMultRange=1.0
+InpLookbackBars=1200

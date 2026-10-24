@@ -10,6 +10,7 @@
 #include "../TradeMath.mqh"
 #include "../RiskGuard.mqh"
 #include "../Safety.mqh"
+#include "../Regime.mqh"
 
 #ifndef __MQL5__
 #include <cstdio>
@@ -805,6 +806,127 @@ void Test_Lookahead(CRBTest &t)
      }
   }
 
+//--- volatility / range regime ---------------------------------------
+// n bars with range 1.0; the last `tail` bars get range tail_range; closes move by `step`.
+void T_RegSeries(CRBSeries &s, int n, int tail, double tail_range, double step)
+  {
+   for(int i = 0; i < n; i++)
+     {
+      double r = (i >= n - tail) ? tail_range : 1.0;
+      double c = 100.0 + step * i;
+      T_Add(s, c, c + r / 2.0, c - r / 2.0, c);
+     }
+  }
+
+void Test_Regime(CRBTest &t)
+  {
+   RBRegimeCfg rc;
+   rc.Defaults();
+   RBRegime r;
+   RBRegimeDecision d;
+
+   {
+      CRBSeries s;
+      T_RegSeries(s, 1100, 0, 1.0, 0.1);
+      RB_ComputeATR(s, 14);
+      t.Check(RB_ClassifyRegime(s, 1099, rc, r), "regime classified");
+      t.Near(r.vol_ratio, 1.0, 1e-6, "flat volatility -> VR 1");
+      t.Check(r.vol_class == RB_VOL_NORMAL, "normal volatility");
+      t.Near(r.er, 1.0, 1e-9, "steady trend -> ER 1");
+      t.Check(!r.ranging, "trend is not ranging");
+      RB_RegimeDecide(r, rc, 6.0, d);
+      t.Check(d.allow && d.risk_mult == 1.0 && d.rr == 6.0, "normal trend -> full risk, 6R");
+   }
+   {
+      CRBSeries s;
+      T_RegSeries(s, 1100, 14, 3.0, 0.1);
+      RB_ComputeATR(s, 14);
+      RB_ClassifyRegime(s, 1099, rc, r);
+      t.Check(r.vol_class == RB_VOL_HIGH, "range x3 for 14 bars -> HIGH");
+      RB_RegimeDecide(r, rc, 6.0, d);
+      t.Check(d.allow && d.risk_mult == 0.5, "high volatility -> half risk (default)");
+   }
+   {
+      CRBSeries s;
+      T_RegSeries(s, 1100, 14, 6.0, 0.1);
+      RB_ComputeATR(s, 14);
+      RB_ClassifyRegime(s, 1099, rc, r);
+      t.Check(r.vol_class == RB_VOL_EXTREME, "range x6 -> EXTREME");
+      RB_RegimeDecide(r, rc, 6.0, d);
+      t.Check(!d.allow && d.reason == "EXTREME", "extreme volatility -> no trade (default)");
+   }
+   {
+      CRBSeries s;
+      T_RegSeries(s, 1100, 40, 0.3, 0.0);
+      RB_ComputeATR(s, 14);
+      RB_ClassifyRegime(s, 1099, rc, r);
+      t.Check(r.vol_class == RB_VOL_LOW, "quiet tail -> LOW");
+      t.Check(r.ranging && r.er == 0.0, "flat closes -> ranging");
+      RB_RegimeDecide(r, rc, 6.0, d);
+      t.Check(d.allow && d.risk_mult == 0.5 && d.reason == "LOW+RANGE", "low + range -> half risk");
+      RBRegimeCfg skip = rc;
+      skip.trade_range = false;
+      RB_RegimeDecide(r, skip, 6.0, d);
+      t.Check(!d.allow, "range policy skip wins");
+      RBRegimeCfg rr = rc;
+      rr.rr_low = 4.0;
+      rr.rr_range = 3.0;
+      RB_RegimeDecide(r, rr, 6.0, d);
+      t.Near(d.rr, 3.0, 1e-12, "range RR override has priority");
+      rr.risk_mult_low = 0.25;
+      RB_RegimeDecide(r, rr, 6.0, d);
+      t.Near(d.risk_mult, 0.25, 1e-12, "most conservative multiplier wins");
+   }
+   {
+      CRBSeries s;
+      T_RegSeries(s, 1100, 0, 1.0, 0.0);
+      RB_ComputeATR(s, 14);
+      RB_ClassifyRegime(s, 1099, rc, r);
+      t.Check(r.vol_class == RB_VOL_NORMAL && r.ranging, "normal volatility, sideways");
+      RBRegimeCfg rg = rc;
+      rg.risk_mult_range = 0.3;
+      RB_RegimeDecide(r, rg, 6.0, d);
+      t.Check(d.allow && d.reason == "NORMAL+RANGE", "normal + range tag");
+      t.Near(d.risk_mult, 0.3, 1e-12, "range multiplier applied in normal volatility");
+   }
+   {
+      // too little history -> unknown -> skip; disabled -> always allowed
+      CRBSeries s;
+      T_RegSeries(s, 100, 0, 1.0, 0.1);
+      RB_ComputeATR(s, 14);
+      t.Check(!RB_ClassifyRegime(s, 99, rc, r), "short history -> invalid");
+      RB_RegimeDecide(r, rc, 6.0, d);
+      t.Check(!d.allow && d.reason == "REGIME_UNKNOWN", "unknown regime -> skip");
+      RBRegimeCfg off = rc;
+      off.enabled = false;
+      RB_RegimeDecide(r, off, 6.0, d);
+      t.Check(d.allow && d.risk_mult == 1.0 && d.rr == 6.0, "regime filter off -> unchanged");
+      RBRegimeCfg neu;
+      neu.Neutral();
+      RBRegime ex;
+      ex.valid = true;
+      ex.vol_class = RB_VOL_EXTREME;
+      ex.ranging = true;
+      ex.vol_ratio = 3.0;
+      ex.er = 0.1;
+      RB_RegimeDecide(ex, neu, 6.0, d);
+      t.Check(d.allow && d.risk_mult == 1.0, "neutral baseline trades every regime at full risk");
+   }
+   {
+      // no lookahead: regime at k ignores bars after k
+      CRBSeries a, b;
+      T_RegSeries(a, 1100, 0, 1.0, 0.1);
+      T_RegSeries(b, 1100, 0, 1.0, 0.1);
+      T_Add(b, 300.0, 400.0, 200.0, 350.0);
+      RB_ComputeATR(a, 14);
+      RB_ComputeATR(b, 14);
+      RBRegime ra, rb2;
+      RB_ClassifyRegime(a, 1099, rc, ra);
+      RB_ClassifyRegime(b, 1099, rc, rb2);
+      t.Check(ra.vol_ratio == rb2.vol_ratio && ra.er == rb2.er, "regime uses closed bars up to k only");
+   }
+  }
+
 //--- entry point ----------------------------------------------------
 void RB_RunAllTests(CRBTest &t)
   {
@@ -818,6 +940,7 @@ void RB_RunAllTests(CRBTest &t)
    Test_RiskGuard(t);
    Test_Safety(t);
    Test_Lookahead(t);
+   Test_Regime(t);
    RB_TestPrint("RBOTE tests: passed=" + IntegerToString(t.passed) + " failed=" + IntegerToString(t.failed));
   }
 

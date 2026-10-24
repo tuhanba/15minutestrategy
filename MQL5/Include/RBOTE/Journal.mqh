@@ -4,6 +4,8 @@
 #ifndef RBOTE_JOURNAL_MQH
 #define RBOTE_JOURNAL_MQH
 
+#include "Regime.mqh"
+
 class CRBJournal
   {
 private:
@@ -68,12 +70,13 @@ public:
    void              Trade(datetime open_time, datetime close_time, int dir, double planned_entry,
                            double fill_price, double sl, double tp, double volume,
                            double risk_money, double net, double r, const string signal_id,
-                           double atr, int zone_type, double rr, int stop_mode, double exit_price)
+                           double atr, int zone_type, double rr, int stop_mode, double exit_price,
+                           int vol_class, bool ranging, double vol_ratio, double er, double risk_mult)
      {
       if(!m_enabled)
          return;
       int h = OpenAppend(m_trades_file,
-                         "open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;atr;zone_type;rr;stop_mode;exit_price");
+                         "open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;atr;zone_type;rr;stop_mode;exit_price;regime;vol_ratio;er;risk_mult");
       if(h == INVALID_HANDLE)
          return;
       FileWrite(h, TimeToString(open_time, TIME_DATE | TIME_MINUTES),
@@ -82,7 +85,9 @@ public:
                 DoubleToString(sl, _Digits), DoubleToString(tp, _Digits), DoubleToString(volume, 2),
                 DoubleToString(risk_money, 2), DoubleToString(net, 2), DoubleToString(r, 4),
                 signal_id, DoubleToString(atr, _Digits), zone_type, DoubleToString(rr, 2), stop_mode,
-                DoubleToString(exit_price, _Digits));
+                DoubleToString(exit_price, _Digits),
+                (vol_class < 0 ? (string)"UNKNOWN" : RB_VolText(vol_class)) + (ranging ? "+RANGE" : ""),
+                DoubleToString(vol_ratio, 3), DoubleToString(er, 3), DoubleToString(risk_mult, 2));
       FileClose(h);
      }
   };

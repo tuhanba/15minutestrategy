@@ -18,6 +18,7 @@
 #include <RBOTE/Safety.mqh>
 #include <RBOTE/MT5Bridge.mqh>
 #include <RBOTE/Journal.mqh>
+#include <RBOTE/Regime.mqh>
 
 //--- inputs ---------------------------------------------------------
 input group "Safety / mode"
@@ -76,8 +77,27 @@ input string InpNewsCurrency       = "USD";   // Calendar currency
 input int    InpNewsMinutesBefore  = 15;      // Minutes before the event
 input int    InpNewsMinutesAfter   = 15;      // Minutes after the event
 
+input group "Volatility / range regime (ASSUMPTIONS - validate per regime)"
+input bool   InpRegimeEnabled      = true;    // Classify volatility/range and apply the policy below
+input int    InpRegimeAtrLookback  = 960;     // ATR baseline bars (960 = ~10 trading days)
+input double InpVolLowThr          = 0.70;    // LOW volatility: ATR / baseline <=
+input double InpVolHighThr         = 1.50;    // HIGH volatility: ATR / baseline >=
+input double InpVolExtremeThr      = 2.50;    // EXTREME volatility: ATR / baseline >=
+input int    InpRangeErPeriod      = 32;      // Efficiency-ratio bars (32 = 8 hours)
+input double InpRangeEr            = 0.20;    // RANGE (sideways): efficiency ratio <=
+input bool   InpTradeHighVol       = true;    // HIGH volatility: trade?
+input double InpRiskMultHighVol    = 0.5;     // HIGH volatility: risk multiplier
+input double InpRRHighVol          = 0.0;     // HIGH volatility: RR override (0 = keep)
+input bool   InpTradeExtremeVol    = false;   // EXTREME volatility: trade?
+input bool   InpTradeLowVol        = true;    // LOW volatility: trade?
+input double InpRiskMultLowVol     = 0.5;     // LOW volatility: risk multiplier
+input double InpRRLowVol           = 0.0;     // LOW volatility: RR override (0 = keep)
+input bool   InpTradeRange         = true;    // RANGE market: trade?
+input double InpRiskMultRange      = 0.5;     // RANGE market: risk multiplier
+input double InpRRRange            = 0.0;     // RANGE market: RR override (0 = keep)
+
 input group "Engine / logging"
-input int    InpLookbackBars       = 600;     // Closed M15 bars scanned on every new bar
+input int    InpLookbackBars       = 1200;    // Closed M15 bars scanned on every new bar
 input bool   InpJournal            = true;    // Write CSV journal + trades file
 
 //--- state ----------------------------------------------------------
@@ -86,6 +106,7 @@ CRBJournal    g_log;
 CRBMeta       g_meta;
 RBConfig      g_cfg;
 RBRiskLimits  g_lim;
+RBRegimeCfg   g_reg;
 RBSymbolSpec  g_spec;
 bool          g_tester      = false;
 bool          g_ready       = false;
@@ -122,6 +143,25 @@ void BuildConfig(void)
    g_cfg.require_sl_beyond_rb = InpRequireSlBeyondRb;
    g_cfg.rr                   = InpRR;
    g_cfg.min_stop_spread_mult = InpMinStopSpreadMult;
+
+   g_reg.Defaults();
+   g_reg.enabled         = InpRegimeEnabled;
+   g_reg.atr_lookback    = InpRegimeAtrLookback;
+   g_reg.low_thr         = InpVolLowThr;
+   g_reg.high_thr        = InpVolHighThr;
+   g_reg.extreme_thr     = InpVolExtremeThr;
+   g_reg.er_period       = InpRangeErPeriod;
+   g_reg.range_er        = InpRangeEr;
+   g_reg.trade_high      = InpTradeHighVol;
+   g_reg.risk_mult_high  = InpRiskMultHighVol;
+   g_reg.rr_high         = InpRRHighVol;
+   g_reg.trade_extreme   = InpTradeExtremeVol;
+   g_reg.trade_low       = InpTradeLowVol;
+   g_reg.risk_mult_low   = InpRiskMultLowVol;
+   g_reg.rr_low          = InpRRLowVol;
+   g_reg.trade_range     = InpTradeRange;
+   g_reg.risk_mult_range = InpRiskMultRange;
+   g_reg.rr_range        = InpRRRange;
 
    g_lim.Defaults();
    g_lim.risk_pct           = InpRiskPct / 100.0;
@@ -218,7 +258,10 @@ int OnInit(void)
       return INIT_PARAMETERS_INCORRECT;
      }
    if(!(InpFibLevel > 0.0 && InpFibLevel < 1.0) || !(InpRR > 0.0) || !(InpRiskPct > 0.0) || InpRiskPct > 2.0 ||
-      !(InpDailyLossPct > 0.0) || InpLookbackBars < InpZoneMaxAgeBars + 50)
+      !(InpDailyLossPct > 0.0) || InpLookbackBars < InpZoneMaxAgeBars + 50 ||
+      (InpRegimeEnabled && (InpLookbackBars < InpRegimeAtrLookback + InpRangeErPeriod + 20 ||
+                            InpRiskMultHighVol > 1.0 || InpRiskMultLowVol > 1.0 || InpRiskMultRange > 1.0 ||
+                            !(InpVolLowThr < InpVolHighThr && InpVolHighThr < InpVolExtremeThr))))
      {
       g_log.Log("INIT_REFUSED", "", "invalid inputs", "check fib/rr/risk/lookback");
       return INIT_PARAMETERS_INCORRECT;
@@ -408,7 +451,7 @@ bool TimeBlocked(string &why)
 //+------------------------------------------------------------------+
 //| Signal -> checks -> limit order                                  |
 //+------------------------------------------------------------------+
-void ProcessSignal(const RBSignal &sig)
+void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
   {
    string id = RB_SignalId(sig.dir, sig.rb_time);
    string ctx = StringFormat("%s RB[%s..%s] zone=%s[%s..%s] hits=%d", DirText(sig.dir),
@@ -423,7 +466,20 @@ void ProcessSignal(const RBSignal &sig)
       return;
      }
    g_meta.MarkProcessed(id);   // one attempt per signal, also when rejected below
+   //--- volatility / range regime at the confirming (closed) bar
+   RBRegime reg;
+   RB_ClassifyRegime(series, sig.confirm_idx, g_reg, reg);
+   RBRegimeDecision rd;
+   RB_RegimeDecide(reg, g_reg, InpRR, rd);
+   ctx += StringFormat(" regime=%s VR=%.2f ER=%.2f", rd.reason, reg.vol_ratio, reg.er);
    g_log.Log("SIGNAL", id, ctx, "RB confirmed");
+   if(!rd.allow)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "REGIME_SKIP " + rd.reason);
+      return;
+     }
+   RBConfig cfg = g_cfg;
+   cfg.rr = rd.rr;
 
    string why = "";
    if(g_day_blocked)
@@ -456,7 +512,7 @@ void ProcessSignal(const RBSignal &sig)
      }
 
    RBPlan plan;
-   int r = RB_BuildPlan(sig, g_cfg, g_spec, plan);
+   int r = RB_BuildPlan(sig, cfg, g_spec, plan);
    if(r != 0)
      {
       g_log.Log("SIGNAL_REJECTED", id, ctx, RB_ReasonText(r));
@@ -476,7 +532,7 @@ void ProcessSignal(const RBSignal &sig)
 
    //--- lot size: risk budget / (price loss per lot + commission + slippage)
    double bal = AccountInfoDouble(ACCOUNT_BALANCE), eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   double risk_money = RB_RiskMoney(g_lim, bal, eq);
+   double risk_money = RB_RiskMoney(g_lim, bal, eq) * rd.risk_mult;
    ENUM_ORDER_TYPE mtype = plan.dir == RB_DIR_BULL ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double tick_loss = RB_LossPerLot(plan.risk_dist, g_spec, InpCommissionPerLotRT, InpSlippageTicks);
    double calc_loss = RB_LossBetween(_Symbol, mtype, 1.0, plan.entry, plan.sl);
@@ -550,6 +606,12 @@ void ProcessSignal(const RBSignal &sig)
    g_meta.Set(ticket, "risk", trade_risk);
    g_meta.Set(ticket, "atr", sig.atr);
    g_meta.Set(ticket, "zty", sig.zone_type);
+   g_meta.Set(ticket, "vr", reg.vol_ratio);
+   g_meta.Set(ticket, "er", reg.er);
+   g_meta.Set(ticket, "vc", reg.valid ? reg.vol_class : -1);
+   g_meta.Set(ticket, "rng", reg.ranging ? 1.0 : 0.0);
+   g_meta.Set(ticket, "rr", cfg.rr);
+   g_meta.Set(ticket, "rmul", rd.risk_mult);
    // order SENT is logged here; the FILL is logged separately from OnTradeTransaction
    g_log.Log("ORDER_SENT", id, pctx + gctx + " ticket=" + IntegerToString((long)ticket) +
              (tt == ORDER_TIME_SPECIFIED ? " expires=" + TimeToString(exp) : " GTC (EA-side expiry)"), "OK");
@@ -616,7 +678,7 @@ void OnNewBar(void)
      {
       sigs.Get(i, sig);
       if(sig.confirm_idx == n - 1)
-         ProcessSignal(sig);
+         ProcessSignal(sig, s);
      }
   }
 
@@ -712,7 +774,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
              DoubleToString(px, _Digits), net, risk, rr), "broker deals");
    g_log.Trade(t_open, t_close, (int)g_meta.Get(pos, "dir"), g_meta.Get(pos, "entry"), fill,
                g_meta.Get(pos, "sl"), g_meta.Get(pos, "tp"), vol, risk, net, rr, id,
-               g_meta.Get(pos, "atr"), (int)g_meta.Get(pos, "zty"), InpRR, InpStopMode, px);
+               g_meta.Get(pos, "atr"), (int)g_meta.Get(pos, "zty"), g_meta.Get(pos, "rr"), InpStopMode, px,
+               (int)g_meta.Get(pos, "vc"), g_meta.Get(pos, "rng") > 0.5, g_meta.Get(pos, "vr"),
+               g_meta.Get(pos, "er"), g_meta.Get(pos, "rmul"));
    g_meta.Delete(pos);
   }
 

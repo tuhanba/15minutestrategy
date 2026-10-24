@@ -40,6 +40,9 @@ class Trade:
     atr: float
     rr: float
     stop_mode: int
+    regime: str = ""
+    vol_ratio: float = 0.0
+    risk_mult: float = 1.0
 
 
 def _parse_time(text: str) -> datetime:
@@ -70,6 +73,9 @@ def load_trades(path: Path) -> list[Trade]:
                     atr=float(row.get("atr") or 0.0),
                     rr=float(row.get("rr") or 0.0),
                     stop_mode=int(row.get("stop_mode") or 0),
+                    regime=(row.get("regime") or "").strip(),
+                    vol_ratio=float(row.get("vol_ratio") or 0.0),
+                    risk_mult=float(row.get("risk_mult") or 1.0),
                 )
             )
     trades.sort(key=lambda t: t.close_time)
@@ -285,6 +291,12 @@ def build_report(runs: dict[str, list[Trade]], oos_start: datetime | None, risk_
         verdicts.append("| year | trades | expectancy R |")
         verdicts.append("|---|---|---|")
         verdicts.extend(f"| {k} | {n} | {e:.3f} |" for k, (n, e) in years.items())
+        tagged = group_expectancy([t for t in trades if t.regime], lambda t: t.regime)
+        if tagged:
+            verdicts.append("")
+            verdicts.append("| EA regime (volatility + range) | trades | expectancy R |")
+            verdicts.append("|---|---|---|")
+            verdicts.extend(f"| {k} | {n} | {e:.3f} |" for k, (n, e) in tagged.items())
         regimes = volatility_regimes(trades)
         if regimes:
             verdicts.append("")

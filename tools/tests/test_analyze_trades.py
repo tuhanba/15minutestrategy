@@ -74,3 +74,17 @@ def test_cli(tmp_path, capsys):
     out = tmp_path / "rep.md"
     assert at.main([f"6R={p}", "-o", str(out)]) == 0
     assert out.exists() and "6R / all" in out.read_text()
+
+
+def test_regime_breakdown(tmp_path):
+    p = tmp_path / "t.csv"
+    p.write_text(
+        HEADER + ";regime;vol_ratio;er;risk_mult\n"
+        "2024.01.02 10:00;2024.01.02 12:00;1;100;100;99;106;1.00;250;-250;-1.0;RBOTE|B|1;2.0;0;6.00;0;99;HIGH;1.8;0.5;0.50\n"
+        "2024.01.03 10:00;2024.01.03 12:00;1;100;100;99;106;1.00;250;1500;6.0;RBOTE|B|2;1.0;0;6.00;0;106;NORMAL+RANGE;1.0;0.1;0.50\n",
+        encoding="utf-8",
+    )
+    trades = at.load_trades(p)
+    assert [t.regime for t in trades] == ["HIGH", "NORMAL+RANGE"]
+    rep = at.build_report({"x": trades}, None, 0.0025, 100000.0, 0.01, at.Criteria())
+    assert "| HIGH | 1 | -1.000 |" in rep and "| NORMAL+RANGE | 1 | 6.000 |" in rep
