@@ -92,3 +92,14 @@ def test_time_limit_fails_slow_attempts():
     prog2 = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 14)
     out2 = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog2, 0.0025)
     assert out2.passed and out2.trading_days == 8
+
+
+def test_ash_turbo_seven_trading_days():
+    prog = ps.PROGRAMS["ash_turbo"]
+    assert prog.time_limit_trading_days == 7 and prog.targets == (0.02,)
+    # +1R per day at 0.25%: 2% needs 8 trading days -> fails the 7-day limit
+    out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.0025)
+    assert out.reason == "timeout" and out.trading_days == 7
+    # at 0.3% risk: 7 days * 0.3% compounding = 2.12% -> passes on day 7
+    out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.003)
+    assert out.passed and out.trading_days == 7

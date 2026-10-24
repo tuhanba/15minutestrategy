@@ -44,12 +44,13 @@ class Program:
     trailing: bool
     inactivity_days: int = 35
     time_limit_days: int = 0        # calendar days for the whole challenge, 0 = unlimited
+    time_limit_trading_days: int = 0  # trading days for the whole challenge, 0 = unlimited
 
 
 PROGRAMS = {
     "ash": Program("Ash 1-step 100k", (0.02,), 0.03, 0.06, True),
-    # user's account panel: 7-day limit, 2% target; daily/max assumed as Ash (manager to confirm)
-    "ash_turbo": Program("Ash Turbo 100k (7 days)", (0.02,), 0.03, 0.06, True, 35, 7),
+    # user's account panel: 7 TRADING days, 2% target; daily/max assumed as Ash (manager to confirm)
+    "ash_turbo": Program("Ash Turbo 100k (7 trading days)", (0.02,), 0.03, 0.06, True, 35, 0, 7),
     "phoenix": Program("Phoenix 2-step 100k", (0.04, 0.04), 0.04, 0.06, False),
     "thunderbolt": Program("Thunderbolt 1-step 100k", (0.05,), 0.03, 0.06, True),
 }
@@ -99,6 +100,8 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
     if prog.time_limit_days > 0:
         # calendar -> trading days (5 of 7); hitting the limit before the target is a failure
         max_days = min(max_days, int(prog.time_limit_days * 5 / 7))
+    if prog.time_limit_trading_days > 0:
+        max_days = min(max_days, prog.time_limit_trading_days)
     for target in prog.targets:
         bal = initial
         peak = initial
@@ -227,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--trailing", action="store_true", help="custom: trailing max loss locked at the initial balance")
     ap.add_argument("--inactivity-days", type=int, default=35)
     ap.add_argument("--time-limit-days", type=int, default=0, help="custom: calendar-day limit (0 = none)")
+    ap.add_argument("--time-limit-trading-days", type=int, default=0, help="custom: trading-day limit (0 = none)")
     ap.add_argument("--risks", default="0.25,0.375,0.5,0.75,1.0", help="risk per trade in %%")
     ap.add_argument("--runs", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=11)
@@ -243,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         PROGRAMS["custom"] = Program(args.name, tuple(float(x) / 100.0 for x in args.targets.split(",")),
                                      args.daily_pct / 100.0, args.max_pct / 100.0, args.trailing, args.inactivity_days,
-                                     args.time_limit_days)
+                                     args.time_limit_days, args.time_limit_trading_days)
     text = "# Upcomers challenge simulation\n\n" + "\n".join(
         report(days, p, risks, args.runs, args.seed) for p in (args.program or ["ash_turbo", "ash", "phoenix", "thunderbolt"]))
     if args.output:
