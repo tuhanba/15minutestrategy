@@ -58,7 +58,7 @@ input int    InpOrderExpiryBars    = 8;       // Pending order lifetime in M15 b
 
 input group "Risk (test values, NOT prop-firm rules)"
 input double InpRiskPct            = 0.25;    // Risk per trade, % of min(balance, equity)
-input double InpDailyLossPct       = 1.0;     // Personal daily loss limit, % of day-start ref
+input double InpDailyLossPct       = 2.0;     // Personal daily loss limit, % of day-start ref (Ash Turbo firm: 3% of initial)
 input double InpMaxOpenRiskPct     = 0.5;     // Open + pending + new risk cap, % of equity
 input double InpMaxTotalDDPct      = 4.0;     // Personal total drawdown, % of initial balance (Ash firm: 6%)
 input bool   InpTrailingDD         = true;    // Floor follows the equity peak, locks at initial (Ash rule)
@@ -69,6 +69,12 @@ input int    InpMaxPending         = 1;       // Max pending orders of this EA (
 input double InpCommissionPerLotRT = 0.0;     // Commission per lot, round turn (account currency)
 input double InpSlippageTicks      = 10.0;    // Slippage allowance on the stop (ticks)
 input double InpMaxLots            = 50.0;    // Hard lot cap (Upcomers: 50 lots)
+
+input group "Challenge (Upcomers Ash Turbo)"
+input double   InpProfitTargetPct  = 2.0;     // Stop opening trades once closed balance is +X% (0 = off)
+input int      InpMaxTradingDays   = 7;       // Max days with a closed trade (0 = off)
+input int      InpChallengeDays    = 30;      // Calendar-day limit from the start (0 = off)
+input datetime InpChallengeStart   = 0;       // Challenge start (server time, 0 = first EA start)
 
 input group "Time / news filters"
 input int    InpServerUtcOffset    = -99;     // Server time - UTC in hours (-99 = auto live; tester uses 2 unless set)
@@ -101,12 +107,12 @@ input double InpRiskMultRange      = 0.5;     // RANGE market: risk multiplier
 input double InpRRRange            = 0.0;     // RANGE market: RR override (0 = keep)
 
 input group "Adaptive risk (ASSUMPTIONS - bounded, profit-funded)"
-input bool   InpScaleEnabled       = true;    // Raise risk from realized profit
+input bool   InpScaleEnabled       = false;   // Raise risk from realized profit (off for the challenge, D-015)
 input double InpMaxRiskPct         = 0.5;     // Absolute cap per trade, % (all multipliers included)
 input double InpProfitSharePct     = 2.0;     // % of realized profit added as extra risk per trade
 input double InpBrakeDDPct         = 2.0;     // Back to base risk when balance is this % below its peak
 input int    InpLossReset          = 3;       // Back to base risk after N consecutive losses (0 = off)
-input bool   InpEdgeEnabled        = true;    // Weight risk by the track record of similar setups
+input bool   InpEdgeEnabled        = false;   // Weight risk by the track record of similar setups (off, D-021)
 input int    InpEdgeMinTrades      = 40;      // Closed trades before edge weighting starts
 input double InpEdgePrior          = 20.0;    // Shrinkage (pseudo-trades at 0R per bucket)
 input double InpEdgeGain           = 0.15;    // Multiplier change per 1R of shrunk average
@@ -403,6 +409,80 @@ void CheckInactivity(void)
   }
 
 //+------------------------------------------------------------------+
+//| Challenge tracking: target, trading days (= UTC days with a      |
+//| closed trade on the account), calendar limit                     |
+//+------------------------------------------------------------------+
+datetime ChallengeStart(void)
+  {
+   if(InpChallengeStart > 0)
+      return InpChallengeStart;
+   if(!GlobalVariableCheck(GvKey("challenge_start")))
+      GvSet("challenge_start", (double)TimeCurrent());
+   return (datetime)GvGet("challenge_start", (double)TimeCurrent());
+  }
+
+int ActiveTradingDays(bool &today_counted)
+  {
+   today_counted = false;
+   int off = ServerOffsetSec();
+   datetime start = ChallengeStart();
+   if(!HistorySelect(start, TimeCurrent() + 60))
+      return 0;
+   long today = ((long)TimeCurrent() - off) / 86400;
+   long seen[];
+   int n = 0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0)
+         continue;
+      long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY && entry != DEAL_ENTRY_INOUT)
+         continue;
+      long day = ((long)HistoryDealGetInteger(d, DEAL_TIME) - off) / 86400;
+      bool dup = false;
+      for(int j = 0; j < n && !dup; j++)
+         dup = (seen[j] == day);
+      if(dup)
+         continue;
+      ArrayResize(seen, n + 1);
+      seen[n++] = day;
+      if(day == today)
+         today_counted = true;
+     }
+   return n;
+  }
+
+int g_ch_state = RB_CH_CONTINUE;
+
+//--- evaluates the challenge; on a terminal state cancels pending orders and notifies once
+int CheckChallenge(void)
+  {
+   bool today_counted;
+   int days = ActiveTradingDays(today_counted);
+   datetime end = InpChallengeDays > 0 ? ChallengeStart() + InpChallengeDays * 86400 : 0;
+   int st = RB_ChallengeState(AccountInfoDouble(ACCOUNT_BALANCE), g_lim.initial_balance, InpProfitTargetPct / 100.0,
+                              days, today_counted, InpMaxTradingDays, TimeCurrent(), end);
+   if(st != RB_CH_CONTINUE && st != g_ch_state)
+     {
+      string msg = StringFormat("RBOTE challenge: %s (balance %.2f, trading days %d/%d)", RB_ChallengeText(st),
+                                AccountInfoDouble(ACCOUNT_BALANCE), days, InpMaxTradingDays);
+      CancelAllPending(RB_ChallengeText(st));
+      g_log.Log("CHALLENGE", "", msg, "no new trades; open positions keep their SL/TP");
+      if(!g_tester)
+         SendNotification(msg);
+     }
+   else if(st == RB_CH_CONTINUE && InpMaxTradingDays > 0 && days == InpMaxTradingDays - 1 && !today_counted &&
+           g_ch_state == RB_CH_CONTINUE && (int)GvGet("ch_lastday_warned", 0.0) != days)
+     {
+      GvSet("ch_lastday_warned", days);
+      g_log.Log("CHALLENGE", "", StringFormat("next trading day is the last one (%d/%d used)", days, InpMaxTradingDays), "WARN");
+     }
+   g_ch_state = st;
+   return st;
+  }
+
+//+------------------------------------------------------------------+
 int OnInit(void)
   {
    g_tester = (bool)MQLInfoInteger(MQL_TESTER);
@@ -474,6 +554,9 @@ int OnInit(void)
              StringFormat("scale=%s share=%.2f%% cap=%.2f%% edge=%s", InpScaleEnabled ? "on" : "off",
                           InpProfitSharePct, InpMaxRiskPct, InpEdgeEnabled ? "on" : "off"));
    Reconcile("INIT");
+   g_log.Log("CHALLENGE", "", StringFormat("target=%.2f%% max_trading_days=%d calendar_days=%d start=%s",
+             InpProfitTargetPct, InpMaxTradingDays, InpChallengeDays, TimeToString(ChallengeStart())),
+             RB_ChallengeText(CheckChallenge()));
    g_ready = true;
    g_log.Log("INIT_OK", "", g_tester ? "tester" : (AccountModeCode() == RB_ACC_DEMO ? "demo" : "LIVE"),
              StringFormat("rr=%.1f fib=%.2f stop_mode=%s risk=%.2f%% daily=%.2f%%",
@@ -666,6 +749,12 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    cfg.rr = rd.rr;
 
    string why = "";
+   int ch = CheckChallenge();
+   if(ch != RB_CH_CONTINUE)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, RB_ChallengeText(ch));
+      return;
+     }
    if(g_day_blocked)
      {
       g_log.Log("SIGNAL_REJECTED", id, ctx, "DAILY_BLOCK");
@@ -854,6 +943,7 @@ void OnNewBar(void)
    ManagePendingOnBar(rates, n);
    Reconcile("BAR");
    CheckInactivity();
+   CheckChallenge();
    UpdateHighWaterMark();
 
    //--- day limit: existing exposure already at the limit -> cancel pending, block the day

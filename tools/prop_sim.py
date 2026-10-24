@@ -44,13 +44,19 @@ class Program:
     trailing: bool
     inactivity_days: int = 35
     time_limit_days: int = 0        # calendar days for the whole challenge, 0 = unlimited
-    time_limit_trading_days: int = 0  # trading days for the whole challenge, 0 = unlimited
+    time_limit_trading_days: int = 0  # weekdays for the whole challenge, 0 = unlimited
+    max_active_days: int = 0          # days with >= 1 closed trade allowed (Ash Turbo: 7), 0 = unlimited
+    daily_on_initial: bool = False    # daily limit amount = daily * initial balance (fixed $), not * day reference
 
 
 PROGRAMS = {
     "ash": Program("Ash 1-step 100k", (0.02,), 0.03, 0.06, True),
-    # user's account panel: 7 TRADING days, 2% target; daily/max assumed as Ash (manager to confirm)
-    "ash_turbo": Program("Ash Turbo 100k (7 trading days)", (0.02,), 0.03, 0.06, True, 35, 0, 7),
+    # Ash Turbo (manager D-016..D-022, help.upcomers.com 2026-10-24): 2% target, daily 3% of the initial
+    # balance (3 000 $), 6% trailing floor, at most 7 trading days (= days with a closed trade) within
+    # 30 calendar days (21 weekdays).
+    "ash_turbo": Program("Ash Turbo 100k (7 trading days / 30 days)", (0.02,), 0.03, 0.06, True, 35, 0, 21, 7, True),
+    # conservative reading: 7 weekdays in total
+    "ash_turbo_strict": Program("Ash Turbo 100k (strict: 7 weekdays)", (0.02,), 0.03, 0.06, True, 35, 0, 7, 0, True),
     "phoenix": Program("Phoenix 2-step 100k", (0.04, 0.04), 0.04, 0.06, False),
     "thunderbolt": Program("Thunderbolt 1-step 100k", (0.05,), 0.03, 0.06, True),
 }
@@ -108,6 +114,7 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
         floor = initial * (1 - prog.max_loss)
         phase_trades = 0
         idle_trading_days = 0
+        active_days = 0
         while True:
             if out.trading_days >= max_days:
                 out.reason = "timeout"
@@ -115,7 +122,7 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
             day = next(day_iter)
             out.trading_days += 1
             ref = bal
-            daily_floor = ref * (1 - prog.daily)
+            daily_floor = ref - prog.daily * (initial if prog.daily_on_initial else ref)
             if not day.trades:
                 idle_trading_days += 1
                 if idle_trading_days * 7 / 5 >= prog.inactivity_days:
@@ -149,6 +156,10 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
             if bal >= initial * (1 + target):
                 out.min_phase_trades = min(out.min_phase_trades, phase_trades)
                 break
+            active_days += 1
+            if prog.max_active_days and active_days >= prog.max_active_days:
+                out.reason = "timeout"
+                return out
     out.passed = True
     out.reason = "passed"
     return out
@@ -205,16 +216,23 @@ def report(days: list[Day], program: str, risks: list[float], runs: int, seed: i
              "| risk/trade | method | pass | fail daily | fail max | inactivity | timeout | median trading days | median trades | pass with <5 trades in a phase |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     best = None
+    capped = None
     for risk in risks:
         for method, outs in (("Monte Carlo", monte_carlo(days, prog, risk, runs, seed)), ("replay", replay(days, prog, risk))):
             s = summarize(outs)
             lines.append(f"| {risk:.3%} | {method} ({len(outs)}) | {s['passed']:.1%} | {s['daily']:.1%} | {s['max_loss']:.1%} | "
                          f"{s['inactivity']:.1%} | {s['timeout']:.1%} | {s['median_days']} | {s['median_trades']} | {s['few_trades']:.1%} |")
-            if method == "Monte Carlo" and s["daily"] < 0.05 and (best is None or s["passed"] > best[1]):
-                best = (risk, s["passed"])
+            if method == "Monte Carlo" and s["daily"] < 0.05 and s["max_loss"] < 0.10:
+                if best is None or s["passed"] > best[1]:
+                    best = (risk, s["passed"])
+                if risk <= 0.0035 + 1e-12 and (capped is None or s["passed"] > capped[1]):
+                    capped = (risk, s["passed"])
     lines.append("")
-    lines.append(f"Decision rule (manager D-008): highest Monte Carlo pass rate with P(daily breach) < 5% -> "
+    lines.append("Decision rule (manager D-020/D-022): highest Monte Carlo pass rate with P(daily breach) < 5% "
+                 "and P(max-loss breach) < 10% -> "
                  + (f"**{best[0]:.3%}** (pass {best[1]:.1%})" if best else "**none qualifies**"))
+    lines.append("Same rule capped at 0.35% risk until Upcomers confirms that passing with a single win is allowed -> "
+                 + (f"**{capped[0]:.3%}** (pass {capped[1]:.1%})" if capped else "**none qualifies**"))
     return "\n".join(lines) + "\n"
 
 

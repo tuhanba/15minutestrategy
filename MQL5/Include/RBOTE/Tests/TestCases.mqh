@@ -676,6 +676,13 @@ void Test_RiskGuard(CRBTest &t)
    s.realized_today = 0.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 0, "99600 - 250 above trailing floor 99000");
    t.Check(RB_CheckNewOrder(lim, s, 700.0) == 4, "99600 - 700 below trailing floor 99000");
+   // challenge state (Ash Turbo)
+   t.Check(RB_ChallengeState(102000.0, 100000.0, 0.02, 3, false, 7, 1000, 5000) == RB_CH_TARGET, "2% reached");
+   t.Check(RB_ChallengeState(101999.0, 100000.0, 0.02, 3, false, 7, 1000, 5000) == RB_CH_CONTINUE, "below target");
+   t.Check(RB_ChallengeState(101000.0, 100000.0, 0.02, 7, true, 7, 1000, 5000) == RB_CH_CONTINUE, "day 7 in progress");
+   t.Check(RB_ChallengeState(101000.0, 100000.0, 0.02, 7, false, 7, 1000, 5000) == RB_CH_DAYS_USED, "7 trading days used");
+   t.Check(RB_ChallengeState(101000.0, 100000.0, 0.02, 2, false, 7, 5000, 5000) == RB_CH_EXPIRED, "30-day limit");
+   t.Check(RB_ChallengeState(101000.0, 100000.0, 0.0, 9, false, 0, 1000, 0) == RB_CH_CONTINUE, "challenge rules off");
    lim.trailing_dd = false;
    s.equity = -1.0;
    t.Check(RB_CheckNewOrder(lim, s, 250.0) == 8, "bad account state");

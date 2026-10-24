@@ -102,7 +102,7 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 
 1. MT5'te **File → Open Data Folder**. Bu repodaki `MQL5/` klasörünün içeriğini açılan `MQL5/` klasörüne kopyala (Experts, Include, Scripts, Presets).
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
-3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=219 failed=0` ve `ALL PASSED` görünmeli.
+3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=225 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
    - `InpStopUnit` seçilmezse EA başlamaz. `PRICE` seçmek, "10" değerini 10.00 fiyat birimi kabul etmek demektir.
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
@@ -118,7 +118,7 @@ Aksi halde `INIT_REFUSED` verir. Contest hesapları her durumda reddedilir.
 ## Testler
 
 ```bash
-make test                         # g++: ortak MQL5 testleri (219 kontrol)
+make test                         # g++: ortak MQL5 testleri (225 kontrol)
 python3 -m pytest -q tools/tests  # analiz aracı testleri
 ```
 
@@ -207,6 +207,6 @@ Ayrıntılar `docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md` içinde.
 | 6 | OB tanımı (son karşı mum + BOS + FVG) | | Kaynakta OB kuralı verilmedi |
 | 7 | Bölge ömrü 192 bar, emir ömrü 8 bar | | Kaynakta yok |
 | 8 | Risk %0.25, günlük %1, açık risk %0.5 | | Test değerleri; firma kuralı değil |
-| 9 | Prop firma: Upcomers **Ash** (1 faz: %2 hedef, günlük %3, %6 zirveyi izleyen taban, başlangıçta kilit) | EA: kişisel günlük %1, zirveyi izleyen %4 taban (`InpTrailingDD`) | Kurallar resmi yardım merkezinden okundu (2026-10-24); komisyon bulunamadı, kullanıcı onayı bekliyor |
+| 9 | Prop firma: Upcomers **Ash Turbo** 100k (%2 hedef, en fazla 7 işlem günü = işlem kapanan gün, 30 takvim günü, günlük 3 000 $, %6 izleyen taban) | EA: `InpProfitTargetPct=2`, `InpMaxTradingDays=7`, `InpChallengeDays=30`, kişisel günlük %2, izleyen %4 taban; ön ayar `RBOTE_AshTurbo_live_demo` | Kurallar resmi yardım merkezinden okundu (2026-10-24); süre dolunca ne olduğu, tekrar hakkı ve komisyon bulunamadı; kullanıcı onayı bekliyor |
 | 11 | Kâra göre risk (%2 pay, %0.5 tavan, frenler) ve kenar ağırlığı (40 işlem, prior 20, gain 0.15, 0.5–1.5) | EA varsayılanı | Kaynakta yok; aşırı uyum riski var; `_adaptive` ile `_regime` ön ayarı karşılaştırılmalı |
 | 10 | Rejim eşikleri (VR 0.7 / 1.5 / 2.5, ER 0.2) ve politika (×0.5, EXTREME işlem yok) | EA varsayılanı | Kaynakta volatilite kuralı yok; backtest rejim kırılımıyla seçilmeli |

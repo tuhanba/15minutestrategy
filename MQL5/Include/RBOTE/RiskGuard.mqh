@@ -124,6 +124,41 @@ int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double ne
    return 0;
   }
 
+//+------------------------------------------------------------------+
+//| Challenge state (Upcomers Ash Turbo: 2% target, max 7 trading    |
+//| days = days with a closed trade, within 30 calendar days).       |
+//+------------------------------------------------------------------+
+#define RB_CH_CONTINUE  0
+#define RB_CH_TARGET    1   // target reached: stop opening trades
+#define RB_CH_DAYS_USED 2   // all trading days used without reaching the target
+#define RB_CH_EXPIRED   3   // calendar limit passed
+
+string RB_ChallengeText(int s)
+  {
+   switch(s)
+     {
+      case RB_CH_CONTINUE:  return "CONTINUE";
+      case RB_CH_TARGET:    return "TARGET_REACHED";
+      case RB_CH_DAYS_USED: return "TRADING_DAYS_USED";
+      case RB_CH_EXPIRED:   return "CHALLENGE_EXPIRED";
+     }
+   return "UNKNOWN";
+  }
+
+//--- today_counted: a trade already closed today, so today is one of the active_days
+//--- (more trades may still be taken today without using a new trading day)
+int RB_ChallengeState(double balance, double initial, double target_pct, int active_days, bool today_counted,
+                      int max_days, datetime now, datetime end)
+  {
+   if(target_pct > 0.0 && initial > 0.0 && balance >= initial * (1.0 + target_pct) - 1e-6)
+      return RB_CH_TARGET;
+   if(end > 0 && now >= end)
+      return RB_CH_EXPIRED;
+   if(max_days > 0 && (active_days > max_days || (active_days == max_days && !today_counted)))
+      return RB_CH_DAYS_USED;
+   return RB_CH_CONTINUE;
+  }
+
 //--- true when existing exposure alone already breaches the daily limit
 //--- (used to cancel pending orders and stop new ones for the rest of the day)
 bool RB_DailyLimitBreached(const RBRiskLimits &lim, const RBRiskSnapshot &s, double current_day_pnl)

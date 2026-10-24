@@ -96,10 +96,25 @@ def test_time_limit_fails_slow_attempts():
 
 def test_ash_turbo_seven_trading_days():
     prog = ps.PROGRAMS["ash_turbo"]
-    assert prog.time_limit_trading_days == 7 and prog.targets == (0.02,)
-    # +1R per day at 0.25%: 2% needs 8 trading days -> fails the 7-day limit
+    assert prog.max_active_days == 7 and prog.time_limit_trading_days == 21 and prog.targets == (0.02,)
+    # +1R per traded day at 0.25%: 2% needs 8 traded days -> fails after the 7th traded day
     out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.0025)
     assert out.reason == "timeout" and out.trading_days == 7
-    # at 0.3% risk: 7 days * 0.3% compounding = 2.12% -> passes on day 7
-    out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.003)
-    assert out.passed and out.trading_days == 7
+    # days without a closed trade do not use up the 7 trading days (only the 21-weekday limit)
+    mixed = []
+    for _ in range(10):
+        mixed += [[(1.0, -0.2)], []]
+    out = ps.attempt(it(days_from(mixed)), prog, 0.003)
+    assert out.passed and out.trading_days == 13
+    # strict reading: 7 weekdays in total -> the same sequence fails
+    out = ps.attempt(it(days_from(mixed)), ps.PROGRAMS["ash_turbo_strict"], 0.003)
+    assert out.reason == "timeout"
+
+
+def test_turbo_daily_limit_is_fixed_amount():
+    # balance first grows to 101.4k; next day a -3.0R dip at 1% risk = -3 042 $:
+    # breaches the fixed 3 000 $ limit, but would NOT breach 3% of the 101.4k day reference (3 042 $)
+    days = days_from([[(1.4, 0.0)], [(-1.0, -3.0)]])
+    assert ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01).reason == "daily"
+    relative = ps.Program("relative", (0.02,), 0.03, 0.06, True, 35, 0, 21, 7, False)
+    assert ps.attempt(it(days), relative, 0.01).reason != "daily"

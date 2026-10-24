@@ -44,3 +44,8 @@ InpLookbackBars=1200
 ; Adaptive risk OFF: flat risk so the effect of scaling can be measured separately
 InpScaleEnabled=false
 InpEdgeEnabled=false
+; Multi-year backtest: challenge stop rules OFF (otherwise trading stops at +2%)
+InpProfitTargetPct=0
+InpMaxTradingDays=0
+InpChallengeDays=0
+InpTrailingDD=false

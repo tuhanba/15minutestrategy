@@ -1,0 +1,33 @@
+; RBOTE preset for an Upcomers Ash Turbo 100k account (DEMO / evaluation use)
+; Rules (help.upcomers.com, read 2026-10-24, user must confirm): 2% target, max 7 trading days
+; (days with a closed trade) within 30 calendar days, daily loss 3 000 $, 6% trailing floor.
+; Risk per trade stays 0.25% until the challenge simulation picks a value (manager D-022: <= 0.35%
+; unless Upcomers confirms that passing with a single win is allowed).
+; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source "Stop: 10.00" as 10.00 price units.
+InpAllowLiveTrading=false
+InpMagic=7915790
+InpFibLevel=0.79
+InpRR=6
+InpStopMode=0
+InpStopDistance=10.0
+InpStopUnit=0
+InpRiskPct=0.25
+InpMaxRiskPct=0.5
+InpDailyLossPct=2.0
+InpMaxOpenRiskPct=0.5
+InpMaxTotalDDPct=4.0
+InpTrailingDD=true
+InpMaxTradesPerDay=3
+InpMaxPositions=1
+InpMaxPending=1
+InpMaxLots=50
+InpProfitTargetPct=2.0
+InpMaxTradingDays=7
+InpChallengeDays=30
+InpScaleEnabled=false
+InpEdgeEnabled=false
+InpRegimeEnabled=true
+InpNewsFilter=true
+InpJournal=true
+; SET the broker round-turn commission per lot (unknown for Upcomers; check XAUUSD Specification)
+InpCommissionPerLotRT=0.0

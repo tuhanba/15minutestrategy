@@ -196,7 +196,9 @@ def main(argv=None) -> int:
         if not any(d.trades for d in days):
             out.append("no trades")
             continue
-        out.append(ps.report(days, "ash_turbo", [0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015], args.mc_runs, 11))
+        turbo_grid = [0.0025, 0.0035, 0.005, 0.0075, 0.01, 0.015]
+        out.append(ps.report(days, "ash_turbo", turbo_grid, args.mc_runs, 11))
+        out.append(ps.report(days, "ash_turbo_strict", turbo_grid, args.mc_runs, 11))
         out.append(ps.report(days, "ash", [0.001, 0.0015, 0.002, 0.0025, 0.0035, 0.005], args.mc_runs, 11))
         for prog in ("phoenix", "thunderbolt"):
             out.append(ps.report(days, prog, [0.0025, 0.00375, 0.005, 0.0075, 0.01], args.mc_runs, 11))

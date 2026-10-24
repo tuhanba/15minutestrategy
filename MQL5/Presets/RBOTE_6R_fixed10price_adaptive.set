@@ -54,3 +54,8 @@ InpEdgePrior=20
 InpEdgeGain=0.15
 InpEdgeMinMult=0.5
 InpEdgeMaxMult=1.5
+; Multi-year backtest: challenge stop rules OFF (otherwise trading stops at +2%)
+InpProfitTargetPct=0
+InpMaxTradingDays=0
+InpChallengeDays=0
+InpTrailingDD=false
