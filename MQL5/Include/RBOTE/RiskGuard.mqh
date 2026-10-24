@@ -1,0 +1,120 @@
+//+------------------------------------------------------------------+
+//| RiskGuard.mqh - personal / prop-style risk limits (pure logic)   |
+//|                                                                  |
+//| These are TEST limits, not any prop firm's official rules.       |
+//|                                                                  |
+//| Each risk is counted exactly once:                               |
+//|  realized_today  : closed P/L since day start (commission, swap) |
+//|  open_risk       : for each open position, loss from its OPEN    |
+//|                    price to its SL (already includes floating)   |
+//|  pending_risk    : for each pending order, loss from order price |
+//|                    to its SL                                     |
+//|  new_risk        : the order being evaluated                     |
+//+------------------------------------------------------------------+
+#ifndef RBOTE_RISKGUARD_MQH
+#define RBOTE_RISKGUARD_MQH
+
+#include "Compat.mqh"
+
+struct RBRiskLimits
+  {
+   double risk_pct;              // per trade, fraction of equity reference (0.0025)
+   double daily_loss_pct;        // fraction of day-start reference (0.01)
+   double max_open_risk_pct;     // open + pending + new, fraction of equity (0.005)
+   double max_total_dd_pct;      // from initial balance, 0 = off
+   double initial_balance;       // reference for total DD (0 = off)
+   int    max_trades_per_day;    // filled entries per day, 0 = off
+   int    max_positions;         // open positions of this EA, 0 = off
+   int    max_pending;           // pending orders of this EA, 0 = off
+
+   void              Defaults(void)
+     {
+      risk_pct           = 0.0025;
+      daily_loss_pct     = 0.01;
+      max_open_risk_pct  = 0.005;
+      max_total_dd_pct   = 0.0;
+      initial_balance    = 0.0;
+      max_trades_per_day = 3;
+      max_positions      = 1;
+      max_pending        = 1;
+     }
+  };
+
+struct RBRiskSnapshot
+  {
+   double balance;
+   double equity;
+   double day_start_ref;         // max(balance, equity) at server day start
+   double realized_today;        // signed; losses negative
+   double open_risk;             // >= 0
+   double pending_risk;          // >= 0
+   int    trades_today;
+   int    positions;
+   int    pending;
+   bool   unprotected_position;  // a position without SL exists
+  };
+
+//--- per-trade risk budget in account currency: risk_pct * min(balance, equity)
+double RB_RiskMoney(const RBRiskLimits &lim, double balance, double equity)
+  {
+   double ref = MathMin(balance, equity);
+   if(!(ref > 0.0))
+      return 0.0;
+   return lim.risk_pct * ref;
+  }
+
+string RB_GuardText(int code)
+  {
+   switch(code)
+     {
+      case 0: return "ALLOW";
+      case 1: return "UNPROTECTED_POSITION";
+      case 2: return "DAILY_LOSS_LIMIT";
+      case 3: return "MAX_OPEN_RISK";
+      case 4: return "MAX_TOTAL_DRAWDOWN";
+      case 5: return "MAX_TRADES_PER_DAY";
+      case 6: return "MAX_POSITIONS";
+      case 7: return "MAX_PENDING";
+      case 8: return "BAD_ACCOUNT_STATE";
+     }
+   return "UNKNOWN";
+  }
+
+//--- 0 = allow, otherwise the denial reason code
+int RB_CheckNewOrder(const RBRiskLimits &lim, const RBRiskSnapshot &s, double new_risk)
+  {
+   if(!(s.equity > 0.0) || !(s.balance > 0.0) || !(s.day_start_ref > 0.0) || new_risk < 0.0)
+      return 8;
+   if(s.unprotected_position)
+      return 1;
+   double daily_limit = lim.daily_loss_pct * s.day_start_ref;
+   double worst_day   = s.realized_today - s.open_risk - s.pending_risk - new_risk;
+   if(worst_day < -daily_limit - 1e-6)
+      return 2;
+   if(lim.max_open_risk_pct > 0.0 &&
+      s.open_risk + s.pending_risk + new_risk > lim.max_open_risk_pct * s.equity + 1e-6)
+      return 3;
+   if(lim.max_total_dd_pct > 0.0 && lim.initial_balance > 0.0)
+     {
+      double floor_eq = lim.initial_balance * (1.0 - lim.max_total_dd_pct);
+      if(s.equity - s.open_risk - s.pending_risk - new_risk < floor_eq - 1e-6)
+         return 4;
+     }
+   if(lim.max_trades_per_day > 0 && s.trades_today >= lim.max_trades_per_day)
+      return 5;
+   if(lim.max_positions > 0 && s.positions >= lim.max_positions)
+      return 6;
+   if(lim.max_pending > 0 && s.pending >= lim.max_pending)
+      return 7;
+   return 0;
+  }
+
+//--- true when existing exposure alone already breaches the daily limit
+//--- (used to cancel pending orders and stop new ones for the rest of the day)
+bool RB_DailyLimitBreached(const RBRiskLimits &lim, const RBRiskSnapshot &s, double current_day_pnl)
+  {
+   double daily_limit = lim.daily_loss_pct * s.day_start_ref;
+   return current_day_pnl <= -daily_limit + 1e-6;
+  }
+
+#endif

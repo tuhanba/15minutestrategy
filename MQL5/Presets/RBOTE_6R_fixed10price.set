@@ -1,0 +1,24 @@
+; RBOTE tester preset: 6R_fixed10price
+; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source chart's "Stop: 10.00" as 10.00 price units.
+; Verify against the source before trusting results. Structural preset ignores the fixed stop.
+InpAllowLiveTrading=false
+InpMagic=7915790
+InpFibLevel=0.79
+InpRR=6
+InpStopMode=0
+InpStopDistance=10.0
+InpStopUnit=0
+InpStructuralBuffer=0.30
+InpRequireSlBeyondRb=true
+InpRiskPct=0.25
+InpDailyLossPct=1.0
+InpMaxOpenRiskPct=0.5
+InpMaxTradesPerDay=3
+InpMaxPositions=1
+InpMaxPending=1
+InpOrderExpiryBars=8
+InpSlippageTicks=10
+InpNewsFilter=true
+InpJournal=true
+; SET the broker round-turn commission per lot before running (0 = ignored in lot sizing)
+InpCommissionPerLotRT=0.0

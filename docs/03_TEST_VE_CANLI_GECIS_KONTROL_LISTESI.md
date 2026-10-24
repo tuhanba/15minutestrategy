@@ -4,34 +4,35 @@ Her kutu kanıtla (rapor dosyası, log, ekran görüntüsü) işaretlenir. Bir m
 
 ## Aşama 0 — Tanımlar ve bilgiler
 
-- [ ] Kaynak strateji (video/link) incelendi; RB tanımı R1 mi R2 mi kararlaştırıldı (Q1)
-- [ ] OTE ankraj modu kararlaştırıldı veya ikisi de test edilecek (RB_RANGE / SWING_LEG)
+- [x] Kaynak görsel incelendi: RB = tek mum, Fib 1 = fitil ucu, Fib 0 = gövde ucu, giriş 0.79, 6R
+- [ ] Kaynak videonun tamamı izlendi; RB onayı (RB mumu kapanışı mı, sonraki mum mu) ve fitil oranı doğrulandı
 - [ ] "10 point"in fiyat karşılığı belirlendi (0.10 / 1.00 / 10.00) (Q2)
 - [ ] Broker, sunucu, sembol adı; MT5'ten okunan digits, point, tick_size, tick_value, contract_size, volume_min/step, stops_level kaydedildi (Q4)
 - [ ] Gerçek komisyon ve tipik/rollover spread ölçüldü
-- [ ] Platform kararı D1 (Python+MT5 / MQL5) verildi (Q5)
-- [ ] Prop firma adı, programı ve **güncel** kuralları resmi kaynaktan alındı, `config/prop_firm.yaml` dolduruldu, `verified_on` yazıldı (Q3, Q6)
+- [x] Platform: saf MQL5 EA
+- [ ] Prop firma adı, programı ve **güncel** kuralları resmi kaynaktan alındı, `config/prop_firm.example.yaml` kopyalanıp dolduruldu, `verified_on` yazıldı (Q3, Q6)
 - [ ] Kişisel günlük limit < firma günlük limiti; kişisel toplam limit < firma toplam limiti
 
 ## Aşama 1 — Yazılım doğruluğu
 
-- [ ] `pytest` tamamen yeşil, çekirdek kapsam ≥ %90
+- [ ] `make test` (g++) ve `python3 -m pytest tools/tests` yeşil
+- [ ] EA ve `RBOTE_Tests` script'i MetaEditor'de 0 hata ile derlendi; script MT5'te `ALL PASSED` yazdı
 - [ ] Lookahead özellik testi yeşil
-- [ ] Spec §8.2 ve §9.2 sayısal örnekleri testte birebir
+- [ ] Spesifikasyon §5 ve §8 sayısal örnekleri testte birebir
 - [ ] SL genişletme girişimi exception veriyor
 - [ ] Duplicate sinyal → tek emir
 - [ ] Yeniden başlatma testi: kesintili koşu = kesintisiz koşu
-- [ ] Live kilidi testleri yeşil
+- [ ] Gerçek hesapta EA'yı varsayılan ayarlarla eklemek `INIT_REFUSED LIVE_DISABLED_BY_DEFAULT` veriyor
+- [ ] `InpStopUnit` seçilmeden EA başlamıyor
 
 ## Aşama 2 — Backtest
 
 - [ ] Veri kalite raporu temiz (eksik bar oranı, boşluklar belgelendi)
 - [ ] Maliyet modeli: gerçek spread + komisyon + SL kayması dahil
 - [ ] IS / Doğrulama / OOS tarihleri sonuçlara bakmadan sabitlendi
-- [ ] Grid (anchor × RB × stop × 5R/6R × HTF) yalnız IS'te çalıştı; tüm varyantlar raporlandı
+- [ ] Varyantlar (`MQL5/Presets`: 6R sabit, 5R sabit, 6R yapısal) yalnız IS'te karşılaştırıldı; tüm varyantlar raporlandı
 - [ ] 5R vs 6R: hedefe ulaşma oranı, expectancy, max DD ayrı raporlandı
 - [ ] Sabit stop vs yapısal stop karşılaştırması raporlandı
-- [ ] HTF OFF vs H1_BOS vs H1_BOS_PD karşılaştırması raporlandı
 - [ ] Rejim analizi (volatilite tercilleri, trend/range) raporlandı
 - [ ] Walk-forward sonuçları raporlandı
 - [ ] OOS **tek sefer** çalıştı, sonuç ne olursa raporlandı
@@ -46,7 +47,7 @@ Her kutu kanıtla (rapor dosyası, log, ekran görüntüsü) işaretlenir. Bir m
 
 ## Aşama 3 — Demo forward test (MT5 demo hesap)
 
-- [ ] `mode: demo`, hesap tipi DEMO doğrulandı
+- [ ] Hesap tipi DEMO (journal'da `INIT_OK demo`)
 - [ ] En az 8 hafta ve en az 50 işlem (veya kabul edilen eşik)
 - [ ] Her demo işlemi aynı dönemin backtest'i ile işlem-işlem eşleştirildi; sapma sebepleri (spread, dolum, kayma) açıklandı
 - [ ] Sunucu tarafı expiry çalışıyor (bot kapalıyken emir düştü)
@@ -60,8 +61,8 @@ Her kutu kanıtla (rapor dosyası, log, ekran görüntüsü) işaretlenir. Bir m
 ## Aşama 4 — Canlı (prop) geçiş
 
 - [ ] Firma EA/otomasyon kullanımına izin veriyor (yazılı kaynak)
-- [ ] `prop_firm.verified: true`, kurallar son 30 gün içinde tekrar kontrol edildi
-- [ ] Kullanıcı açık yazılı onay verdi; `XAU_RB_OTE_LIVE_CONFIRM=<hesap no>` ayarlandı
+- [ ] Firma kuralları son 30 gün içinde tekrar kontrol edildi; `InpPropRulesVerified=true`
+- [ ] Kullanıcı açık yazılı onay verdi; `InpAllowLiveTrading=true` ve `InpLiveConfirmLogin=<hesap no>` ayarlandı
 - [ ] İlk 2 hafta risk %0.10–0.125 (yarım risk), sonra kademeli %0.25
 - [ ] Günlük izleme: journal, açık risk, günlük worst-case, DD
 - [ ] Durdurma kuralları yazılı: canlı expectancy demo'dan anlamlı sapma, art arda X kayıp, firma limitinin %50'sine yaklaşma → sistem kapatılır, inceleme
