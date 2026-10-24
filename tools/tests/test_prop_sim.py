@@ -82,3 +82,13 @@ def test_ash_two_percent_target():
     # daily 3%: one trade at 1% risk dipping -3.2R breaches
     out = ps.attempt(it(days_from([[(1.0, -3.2)]])), ps.PROGRAMS["ash"], 0.01)
     assert out.reason == "daily"
+
+
+def test_time_limit_fails_slow_attempts():
+    # +1R per day at 0.25% risk needs 8 trading days for 2%; a 7-calendar-day limit (5 trading days) fails
+    prog = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 7)
+    out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.0025)
+    assert not out.passed and out.reason == "timeout" and out.trading_days == 5
+    prog2 = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 14)
+    out2 = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog2, 0.0025)
+    assert out2.passed and out2.trading_days == 8

@@ -43,6 +43,7 @@ class Program:
     max_loss: float
     trailing: bool
     inactivity_days: int = 35
+    time_limit_days: int = 0        # calendar days for the whole challenge, 0 = unlimited
 
 
 PROGRAMS = {
@@ -93,6 +94,9 @@ class Outcome:
 
 def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max_days: int = 520) -> Outcome:
     out = Outcome()
+    if prog.time_limit_days > 0:
+        # calendar -> trading days (5 of 7); hitting the limit before the target is a failure
+        max_days = min(max_days, int(prog.time_limit_days * 5 / 7))
     for target in prog.targets:
         bal = initial
         peak = initial
@@ -220,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-pct", type=float, help="custom: max loss %%")
     ap.add_argument("--trailing", action="store_true", help="custom: trailing max loss locked at the initial balance")
     ap.add_argument("--inactivity-days", type=int, default=35)
+    ap.add_argument("--time-limit-days", type=int, default=0, help="custom: calendar-day limit (0 = none)")
     ap.add_argument("--risks", default="0.25,0.375,0.5,0.75,1.0", help="risk per trade in %%")
     ap.add_argument("--runs", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=11)
@@ -235,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             print("custom program needs --targets --daily-pct --max-pct", file=sys.stderr)
             return 2
         PROGRAMS["custom"] = Program(args.name, tuple(float(x) / 100.0 for x in args.targets.split(",")),
-                                     args.daily_pct / 100.0, args.max_pct / 100.0, args.trailing, args.inactivity_days)
+                                     args.daily_pct / 100.0, args.max_pct / 100.0, args.trailing, args.inactivity_days,
+                                     args.time_limit_days)
     text = "# Upcomers challenge simulation\n\n" + "\n".join(
         report(days, p, risks, args.runs, args.seed) for p in (args.program or ["ash", "phoenix", "thunderbolt"]))
     if args.output:
