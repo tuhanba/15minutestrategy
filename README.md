@@ -29,12 +29,13 @@ lots = floor( risk_money / loss_per_lot / step ) × step     risk_money = 0.25% 
 | `MQL5/Include/RBOTE/TradeMath.mqh` | Fib girişi, SL/TP, birim dönüşümü, piyasa kontrolleri, lot hesabı |
 | `MQL5/Include/RBOTE/RiskGuard.mqh` | Günlük zarar, açık risk, toplam DD, işlem sayısı sınırları |
 | `MQL5/Include/RBOTE/Regime.mqh` | Volatilite (ATR oranı) ve yatay piyasa (efficiency ratio) sınıflandırması, rejim politikası |
+| `MQL5/Include/RBOTE/Adaptive.mqh` | İşlem özellikleri, kâra göre risk ölçekleme, kenar ağırlıklandırma ve açıklaması, MFE/MAE |
 | `MQL5/Include/RBOTE/Safety.mqh` | Canlı mod kapısı, veri tazeliği, bekleyen emir iptali, uzlaştırma kararları, signal id |
 | `MQL5/Include/RBOTE/MT5Bridge.mqh` | Sembol özellikleri, hesap risk snapshot'ı, emir metadatası (global variables), duplicate kontrolü, ekonomik takvim |
 | `MQL5/Include/RBOTE/Journal.mqh` | CSV karar günlüğü ve kapanan işlemler dosyası |
 | `MQL5/Include/RBOTE/Tests/TestCases.mqh` | Ortak birim testleri (MT5 script'i ve g++ aynı dosyayı çalıştırır) |
 | `MQL5/Scripts/RBOTE/RBOTE_Tests.mq5` | Testleri MT5 içinde çalıştıran script |
-| `MQL5/Presets/*.set` | Tester ön ayarları: 6R sabit, 5R sabit, 6R yapısal (rejim yalnız loglanır), 6R sabit + koruyucu rejim politikası |
+| `MQL5/Presets/*.set` | Tester ön ayarları: 6R sabit, 5R sabit, 6R yapısal (rejim yalnız loglanır), 6R sabit + koruyucu rejim politikası, 6R sabit + rejim + adaptif risk |
 | `tests/cpp/run_tests.cpp`, `Makefile` | Testleri Linux/CI'da g++ ile çalıştırma |
 | `tools/analyze_trades.py` (+ `tools/tests`) | Tester çıktısı analizi: expectancy, CI, PF, DD, Monte Carlo, IS/OOS, rejimler, kabul kontrolleri |
 | `config/prop_firm.example.yaml` | Prop firma kuralları kayıt şablonu (doldurulmadı) |
@@ -62,6 +63,23 @@ Karar şöyle verilecek:
 3. Politikayı yalnız IS verisine göre ayarla.
 4. OOS'ta bir kez doğrula.
 
+## Neyi neyden yaptığımızı bilmek
+
+EA her kararı gerekçesiyle kaydeder (spesifikasyon §13):
+- **`DECISION` satırı (her sinyal):** setup ölçüleri, rejim, temel risk, kâra göre ölçekleme, kenar çarpanı ve her koşulun katkısı, nihai risk.
+- **`CLOSED` satırı (her kapanış):** kazanç/kayıp, çıkış sebebi (TP/SL/…), işlemin önce ne kadar lehte ve aleyhte gittiği (MFE/MAE), giriş koşulları, dolum gecikmesi, kullanılan risk ve sebebi.
+- **trades.csv** bunların hepsini sütun olarak içerir.
+- **`analyze_trades.py`** her koşul için kazanma oranı ve expectancy, kazananlar ile kaybedenlerin karşılaştırması ve adaptif boyutlamanın sabit riske göre etkisini raporlar.
+
+### Kâr arttıkça risk (varsayılan açık, sınırlı)
+
+- Ek risk = gerçekleşmiş kârın %2'si. İşlem başına üst sınır %0.5.
+- Bakiye tepeden %2 düşerse veya art arda 3 kayıp gelirse risk temele (%0.25) döner.
+- Kenar ağırlıklandırma: 40 kapanmış işlemden sonra geçmişte iyi sonuç veren koşullarda (yön, bölge, volatilite, yataylık, seans) risk ×1.5'e kadar artar, kötülerde ×0.5'e kadar düşer.
+- Günlük limit her zaman son sözü söyler.
+
+Bu ayarlar **ölçülmedi**. `_regime` (sabit risk) ve `_adaptive` ön ayarlarıyla karşılaştırılmalı.
+
 ## Mimari
 
 ```
@@ -71,7 +89,8 @@ OnTick ─┬─ bağlantı yok → HALTED (işlem yok) ─ yeniden bağlanınca
         └─ yeni M15 barı → OnNewBar
 OnNewBar: CopyRates(kapanmış barlar) → bekleyen emir iptal kontrolleri → Reconcile
           → günlük limit kontrolü → veri tazeliği → RB_Scan (saf) → son barda onaylı sinyal?
-          → ProcessSignal: duplicate → rejim (VR/ER → işlem yok / risk çarpanı / RR) → filtreler (gün blok, cuma, saat, haber, spread)
+          → ProcessSignal: duplicate → rejim (VR/ER → işlem yok / risk çarpanı / RR) → filtreler
+             → risk = kâr ölçeklemesi × rejim × kenar (≤ üst sınır) → DECISION kartı (gün blok, cuma, saat, haber, spread)
              → RB_BuildPlan → RB_CheckMarket → lot → marj → RB_CheckNewOrder → BuyLimit/SellLimit
 OnTradeTransaction: FILLED / CLOSED (net = broker deal profit+commission+swap+fee, R = net / planlanan risk)
 ```
@@ -83,7 +102,7 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 
 1. MT5'te **File → Open Data Folder**. Bu repodaki `MQL5/` klasörünün içeriğini açılan `MQL5/` klasörüne kopyala (Experts, Include, Scripts, Presets).
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
-3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=174 failed=0` ve `ALL PASSED` görünmeli.
+3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=202 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
    - `InpStopUnit` seçilmezse EA başlamaz. `PRICE` seçmek, "10" değerini 10.00 fiyat birimi kabul etmek demektir.
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
@@ -99,7 +118,7 @@ Aksi halde `INIT_REFUSED` verir. Contest hesapları her durumda reddedilir.
 ## Testler
 
 ```bash
-make test                         # g++: ortak MQL5 testleri (174 kontrol)
+make test                         # g++: ortak MQL5 testleri (202 kontrol)
 python3 -m pytest -q tools/tests  # analiz aracı testleri
 ```
 
@@ -115,6 +134,7 @@ Kapsanan durumlar:
 - bozuk sembol özellikleri, canlı mod kapısı
 - lookahead: rastgele seride kesilmiş ve tam seri karşılaştırması
 - rejim: NORMAL, HIGH, EXTREME, LOW ve RANGE sınıflandırması; politika birleştirme; veri yetersizse işlem yok; rejim hesabında gelecek bar kullanılmaması
+- adaptif risk: kâra göre ölçekleme, üst sınır, düşüş ve kayıp serisi frenleri, kenar ağırlığının ısınma dönemi, shrinkage ve sınırları, açıklama metni, MFE/MAE
 
 Testlerin gerçekten hata yakaladığı mutasyonlarla kontrol edildi. Fib yönü, onay, yaklaşma ve gövde kuralı, bölge tüketimi, swing onayı, stop yeri, günlük limit ve canlı mod kapısı tek tek bozuldu ve her biri en az bir testi kırdı.
 
@@ -129,8 +149,9 @@ Testlerin gerçekten hata yakaladığı mutasyonlarla kontrol edildi. Fib yönü
    - `RBOTE_6R_fixed10price`
    - `RBOTE_5R_fixed10price`
    - `RBOTE_6R_structural`
-   - `RBOTE_6R_fixed10price_regime` (koruyucu rejim politikası)
-   İlk üçünde rejim yalnız loglanır.
+   - `RBOTE_6R_fixed10price_regime` (koruyucu rejim politikası, sabit risk)
+   - `RBOTE_6R_fixed10price_adaptive` (rejim + kâra göre risk + kenar ağırlığı)
+   İlk üçünde rejim yalnız loglanır. Adaptif risk yalnız sonuncusunda açıktır.
 3. Dönemler: IS (ör. 2020-01-01 → 2023-12-31) ve OOS (2024-01-01 → bugün). OOS'a bakmadan önce parametreleri sabitle.
 4. Her koşu `Common/Files/RBOTE/tester_XAUUSD_<magic>_<zaman>_trades.csv` üretir. Analiz:
 
@@ -187,4 +208,5 @@ Ayrıntılar `docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md` içinde.
 | 7 | Bölge ömrü 192 bar, emir ömrü 8 bar | | Kaynakta yok |
 | 8 | Risk %0.25, günlük %1, açık risk %0.5 | | Test değerleri; firma kuralı değil |
 | 9 | Prop firma adı ve kuralları | **bilinmiyor** | Kullanıcı sağlamadı |
+| 11 | Kâra göre risk (%2 pay, %0.5 tavan, frenler) ve kenar ağırlığı (40 işlem, prior 20, gain 0.15, 0.5–1.5) | EA varsayılanı | Kaynakta yok; aşırı uyum riski var; `_adaptive` ile `_regime` ön ayarı karşılaştırılmalı |
 | 10 | Rejim eşikleri (VR 0.7 / 1.5 / 2.5, ER 0.2) ve politika (×0.5, EXTREME işlem yok) | EA varsayılanı | Kaynakta volatilite kuralı yok; backtest rejim kırılımıyla seçilmeli |

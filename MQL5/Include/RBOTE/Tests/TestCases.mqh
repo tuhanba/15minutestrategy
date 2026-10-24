@@ -11,6 +11,7 @@
 #include "../RiskGuard.mqh"
 #include "../Safety.mqh"
 #include "../Regime.mqh"
+#include "../Adaptive.mqh"
 
 #ifndef __MQL5__
 #include <cstdio>
@@ -927,6 +928,76 @@ void Test_Regime(CRBTest &t)
    }
   }
 
+//--- profit-funded scaling, edge weighting, features ----------------
+void Test_Adaptive(CRBTest &t)
+  {
+   RBScaleCfg sc;
+   sc.Defaults();
+   string why;
+   // no profit -> base
+   t.Near(RB_ProfitScaledPct(sc, 100000, 100000, 100000, 100000, 0, why), 0.0025, 1e-12, "no profit -> base 0.25%");
+   t.Near(RB_ProfitScaledPct(sc, 100000, 97000, 100000, 97000, 0, why), 0.0025, 1e-12, "in loss -> base, never below");
+   // +5000 profit, 2% share -> +100 -> 0.25% + 100/105000
+   double p = RB_ProfitScaledPct(sc, 100000, 105000, 105000, 105000, 0, why);
+   t.Near(p, 0.0025 + 100.0 / 105000.0, 1e-12, "+5000 profit -> extra 100 risk");
+   t.Check(why == "SCALED", "scaled reason");
+   t.Check(p * 105000 - 0.0025 * 105000 <= 0.02 * 5000 + 1e-9, "extra risk funded only from profit share");
+   // cap
+   t.Near(RB_ProfitScaledPct(sc, 100000, 200000, 200000, 200000, 0, why), 0.005, 1e-12, "capped at max 0.5%");
+   t.Check(why == "SCALED_CAPPED", "capped reason");
+   // brakes
+   t.Near(RB_ProfitScaledPct(sc, 100000, 105000, 108000, 105000, 0, why), 0.0025, 1e-12, "2.8% below HWM -> base");
+   t.Check(why == "BASE_DRAWDOWN_BRAKE", "drawdown brake reason");
+   t.Near(RB_ProfitScaledPct(sc, 100000, 105000, 105000, 105000, 3, why), 0.0025, 1e-12, "3 losses in a row -> base");
+   t.Check(why == "BASE_LOSS_STREAK", "loss streak reason");
+   RBScaleCfg off = sc;
+   off.enabled = false;
+   t.Near(RB_ProfitScaledPct(off, 100000, 150000, 150000, 150000, 0, why), 0.0025, 1e-12, "scaling off -> base");
+
+   // final risk money cap
+   t.Near(RB_FinalRiskMoney(0.0025, 100000, 1.0, 1.0, 0.005), 250.0, 1e-9, "base risk 250");
+   t.Near(RB_FinalRiskMoney(0.0045, 100000, 1.0, 1.5, 0.005), 500.0, 1e-9, "edge x1.5 capped at 0.5%");
+   t.Near(RB_FinalRiskMoney(0.0025, 100000, 0.5, 1.2, 0.005), 150.0, 1e-9, "regime x edge multipliers");
+
+   // features
+   RBFeatures f;
+   RB_MakeFeatures(RB_DIR_BEAR, RB_ZONE_OB, RB_VOL_HIGH, true, 14, f);
+   t.Check(f.b[RB_DIM_DIR] == 1 && f.b[RB_DIM_ZONE] == 1 && f.b[RB_DIM_VOL] == RB_VOL_HIGH &&
+           f.b[RB_DIM_RANGE] == 1 && f.b[RB_DIM_SESSION] == 2, "feature buckets");
+   t.Check(RB_SessionBucket(0) == 0 && RB_SessionBucket(6) == 1 && RB_SessionBucket(23) == 3, "session buckets");
+
+   // edge weighting
+   RBEdgeCfg ec;
+   ec.Defaults();
+   CRBEdgeStats st;
+   RBFeatures win, lose;
+   RB_MakeFeatures(RB_DIR_BULL, RB_ZONE_FVG, RB_VOL_NORMAL, false, 9, win);   // longs, FVG, London-ish
+   RB_MakeFeatures(RB_DIR_BEAR, RB_ZONE_OB, RB_VOL_HIGH, true, 20, lose);     // all buckets differ
+   for(int i = 0; i < 20; i++)
+      st.Add(win, 2.0);
+   t.Near(st.Mult(win, ec, why), 1.0, 1e-12, "warm-up: no weighting before min_total");
+   t.Check(why == "EDGE_WARMUP", "warm-up reason");
+   for(int i = 0; i < 20; i++)
+      st.Add(lose, -1.0);
+   double mw = st.Mult(win, ec, why);
+   double ml = st.Mult(lose, ec, why);
+   t.Near(mw, 1.5, 1e-12, "winning bucket -> more risk (capped 1.5)");          // 1 + 0.15 * 5 * (40/40)
+   t.Near(ml, 1.0 + 0.15 * 5 * (-20.0 / 40.0), 1e-12, "losing bucket -> less risk"); // 0.625
+   t.Check(ml >= ec.min_mult && ml < 1.0, "losing bucket within floor");
+   t.Near(st.Shrunk(RB_DIM_DIR, 0, ec.prior), 40.0 / 40.0, 1e-12, "shrinkage: 20 trades x 2R / (20 + 20)");
+   // explanation: 20 longs at +2R -> shrunk 40/40 = 1.0 -> contrib 0.15 per matching dimension
+   string ex = RB_EdgeExplain(st, win, ec);
+   t.Check(StringFind(ex, "dir=LONG n=20 avgR=2.00 contrib=0.150") >= 0, "edge explanation names bucket, n, avgR, contribution");
+   t.Check(StringFind(ex, "session=H06-11") >= 0, "edge explanation includes session");
+   RBEdgeCfg eoff = ec;
+   eoff.enabled = false;
+   t.Near(st.Mult(win, eoff, why), 1.0, 1e-12, "edge off -> 1");
+
+   // excursions
+   t.Near(RB_ExcursionR(RB_DIR_BULL, 2652.10, 2664.10, 10.0), 1.2, 1e-9, "long MFE in R");
+   t.Near(RB_ExcursionR(RB_DIR_BEAR, 2657.90, 2662.90, 10.0), -0.5, 1e-9, "short adverse excursion in R");
+  }
+
 //--- entry point ----------------------------------------------------
 void RB_RunAllTests(CRBTest &t)
   {
@@ -941,6 +1012,7 @@ void RB_RunAllTests(CRBTest &t)
    Test_Safety(t);
    Test_Lookahead(t);
    Test_Regime(t);
+   Test_Adaptive(t);
    RB_TestPrint("RBOTE tests: passed=" + IntegerToString(t.passed) + " failed=" + IntegerToString(t.failed));
   }
 

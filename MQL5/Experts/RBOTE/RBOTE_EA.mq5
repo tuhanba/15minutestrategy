@@ -19,6 +19,7 @@
 #include <RBOTE/MT5Bridge.mqh>
 #include <RBOTE/Journal.mqh>
 #include <RBOTE/Regime.mqh>
+#include <RBOTE/Adaptive.mqh>
 
 //--- inputs ---------------------------------------------------------
 input group "Safety / mode"
@@ -96,6 +97,19 @@ input bool   InpTradeRange         = true;    // RANGE market: trade?
 input double InpRiskMultRange      = 0.5;     // RANGE market: risk multiplier
 input double InpRRRange            = 0.0;     // RANGE market: RR override (0 = keep)
 
+input group "Adaptive risk (ASSUMPTIONS - bounded, profit-funded)"
+input bool   InpScaleEnabled       = true;    // Raise risk from realized profit
+input double InpMaxRiskPct         = 0.5;     // Absolute cap per trade, % (all multipliers included)
+input double InpProfitSharePct     = 2.0;     // % of realized profit added as extra risk per trade
+input double InpBrakeDDPct         = 2.0;     // Back to base risk when balance is this % below its peak
+input int    InpLossReset          = 3;       // Back to base risk after N consecutive losses (0 = off)
+input bool   InpEdgeEnabled        = true;    // Weight risk by the track record of similar setups
+input int    InpEdgeMinTrades      = 40;      // Closed trades before edge weighting starts
+input double InpEdgePrior          = 20.0;    // Shrinkage (pseudo-trades at 0R per bucket)
+input double InpEdgeGain           = 0.15;    // Multiplier change per 1R of shrunk average
+input double InpEdgeMinMult        = 0.5;     // Edge multiplier floor
+input double InpEdgeMaxMult        = 1.5;     // Edge multiplier ceiling
+
 input group "Engine / logging"
 input int    InpLookbackBars       = 1200;    // Closed M15 bars scanned on every new bar
 input bool   InpJournal            = true;    // Write CSV journal + trades file
@@ -107,6 +121,9 @@ CRBMeta       g_meta;
 RBConfig      g_cfg;
 RBRiskLimits  g_lim;
 RBRegimeCfg   g_reg;
+RBScaleCfg    g_scale;
+RBEdgeCfg     g_edge;
+CRBEdgeStats  g_stats;
 RBSymbolSpec  g_spec;
 bool          g_tester      = false;
 bool          g_ready       = false;
@@ -162,6 +179,22 @@ void BuildConfig(void)
    g_reg.trade_range     = InpTradeRange;
    g_reg.risk_mult_range = InpRiskMultRange;
    g_reg.rr_range        = InpRRRange;
+
+   g_scale.Defaults();
+   g_scale.enabled      = InpScaleEnabled;
+   g_scale.base_pct     = InpRiskPct / 100.0;
+   g_scale.max_pct      = InpMaxRiskPct / 100.0;
+   g_scale.profit_share = InpProfitSharePct / 100.0;
+   g_scale.brake_dd_pct = InpBrakeDDPct / 100.0;
+   g_scale.loss_reset   = InpLossReset;
+
+   g_edge.Defaults();
+   g_edge.enabled   = InpEdgeEnabled;
+   g_edge.min_total = InpEdgeMinTrades;
+   g_edge.prior     = InpEdgePrior;
+   g_edge.gain      = InpEdgeGain;
+   g_edge.min_mult  = InpEdgeMinMult;
+   g_edge.max_mult  = InpEdgeMaxMult;
 
    g_lim.Defaults();
    g_lim.risk_pct           = InpRiskPct / 100.0;
@@ -229,6 +262,105 @@ void BlockToday(const string why)
   }
 
 //+------------------------------------------------------------------+
+//| Adaptive-risk state in global variables (survives restarts)      |
+//+------------------------------------------------------------------+
+string GvKey(const string name) { return "RBOTE." + IntegerToString(InpMagic) + "." + name; }
+
+double GvGet(const string name, double def)
+  {
+   string k = GvKey(name);
+   return GlobalVariableCheck(k) ? GlobalVariableGet(k) : def;
+  }
+
+void GvSet(const string name, double v) { GlobalVariableSet(GvKey(name), v); }
+
+void UpdateHighWaterMark(void)
+  {
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(bal > GvGet("hwm", 0.0))
+      GvSet("hwm", bal);
+  }
+
+void LoadEdgeStats(void)
+  {
+   g_stats.Reset();
+   g_stats.total = GvGet("st.total", 0.0);
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      for(int b = 0; b < RB_FEAT_BUCKETS; b++)
+        {
+         g_stats.n[d][b]     = GvGet("st.n." + IntegerToString(d) + "." + IntegerToString(b), 0.0);
+         g_stats.sum_r[d][b] = GvGet("st.s." + IntegerToString(d) + "." + IntegerToString(b), 0.0);
+        }
+  }
+
+void SaveEdgeStats(void)
+  {
+   GvSet("st.total", g_stats.total);
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      for(int b = 0; b < RB_FEAT_BUCKETS; b++)
+        {
+         GvSet("st.n." + IntegerToString(d) + "." + IntegerToString(b), g_stats.n[d][b]);
+         GvSet("st.s." + IntegerToString(d) + "." + IntegerToString(b), g_stats.sum_r[d][b]);
+        }
+  }
+
+int ScaleReasonCode(const string why)
+  {
+   if(why == "SCALED")              return 1;
+   if(why == "SCALED_CAPPED")       return 2;
+   if(why == "BASE_DRAWDOWN_BRAKE") return 3;
+   if(why == "BASE_LOSS_STREAK")    return 4;
+   if(why == "BASE_NO_REFERENCE")   return 5;
+   return 0;
+  }
+
+string ScaleReasonText(int code)
+  {
+   switch(code)
+     {
+      case 1: return "SCALED";
+      case 2: return "SCALED_CAPPED";
+      case 3: return "BASE_DRAWDOWN_BRAKE";
+      case 4: return "BASE_LOSS_STREAK";
+      case 5: return "BASE_NO_REFERENCE";
+     }
+   return "BASE";
+  }
+
+string ExitReasonText(long reason)
+  {
+   if(reason == DEAL_REASON_SL)     return "SL";
+   if(reason == DEAL_REASON_TP)     return "TP";
+   if(reason == DEAL_REASON_SO)     return "STOP_OUT";
+   if(reason == DEAL_REASON_EXPERT) return "EA";
+   if(reason == DEAL_REASON_CLIENT || reason == DEAL_REASON_MOBILE || reason == DEAL_REASON_WEB)
+      return "MANUAL";
+   return "OTHER";
+  }
+
+//--- track max favourable / adverse excursion of open positions (price distance from entry)
+void UpdateExcursions(double bid, double ask)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagic || PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      ulong id = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      int dir = (int)g_meta.Get(id, "dir");
+      if(dir == 0)
+         continue;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double px   = dir == RB_DIR_BULL ? bid : ask;   // price the position would close at
+      double exc  = dir == RB_DIR_BULL ? px - open : open - px;
+      if(exc > g_meta.Get(id, "mfe"))
+         g_meta.Set(id, "mfe", exc);
+      if(exc < g_meta.Get(id, "mae"))
+         g_meta.Set(id, "mae", exc);
+     }
+  }
+
+//+------------------------------------------------------------------+
 int OnInit(void)
   {
    g_tester = (bool)MQLInfoInteger(MQL_TESTER);
@@ -261,7 +393,9 @@ int OnInit(void)
       !(InpDailyLossPct > 0.0) || InpLookbackBars < InpZoneMaxAgeBars + 50 ||
       (InpRegimeEnabled && (InpLookbackBars < InpRegimeAtrLookback + InpRangeErPeriod + 20 ||
                             InpRiskMultHighVol > 1.0 || InpRiskMultLowVol > 1.0 || InpRiskMultRange > 1.0 ||
-                            !(InpVolLowThr < InpVolHighThr && InpVolHighThr < InpVolExtremeThr))))
+                            !(InpVolLowThr < InpVolHighThr && InpVolHighThr < InpVolExtremeThr))) ||
+      InpMaxRiskPct < InpRiskPct || InpMaxRiskPct > 2.0 || InpProfitSharePct < 0.0 ||
+      InpEdgeMinMult <= 0.0 || InpEdgeMinMult > 1.0 || InpEdgeMaxMult < 1.0 || InpEdgePrior < 0.0)
      {
       g_log.Log("INIT_REFUSED", "", "invalid inputs", "check fib/rr/risk/lookback");
       return INIT_PARAMETERS_INCORRECT;
@@ -289,6 +423,14 @@ int OnInit(void)
    g_trade.SetDeviationInPoints(0);
 
    UpdateDay();
+   UpdateHighWaterMark();
+   LoadEdgeStats();
+   if(InpMaxOpenRiskPct < InpMaxRiskPct)
+      g_log.Log("WARN", "", "InpMaxOpenRiskPct < InpMaxRiskPct", "scaled-up orders will be denied by MAX_OPEN_RISK");
+   g_log.Log("ADAPTIVE", "", StringFormat("start_balance=%.2f hwm=%.2f consecutive_losses=%d edge_trades=%.0f",
+             g_lim.initial_balance, GvGet("hwm", 0.0), (int)GvGet("consec_losses", 0.0), g_stats.total),
+             StringFormat("scale=%s share=%.2f%% cap=%.2f%% edge=%s", InpScaleEnabled ? "on" : "off",
+                          InpProfitSharePct, InpMaxRiskPct, InpEdgeEnabled ? "on" : "off"));
    Reconcile("INIT");
    g_ready = true;
    g_log.Log("INIT_OK", "", g_tester ? "tester" : (AccountModeCode() == RB_ACC_DEMO ? "demo" : "LIVE"),
@@ -532,7 +674,31 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
 
    //--- lot size: risk budget / (price loss per lot + commission + slippage)
    double bal = AccountInfoDouble(ACCOUNT_BALANCE), eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   double risk_money = RB_RiskMoney(g_lim, bal, eq) * rd.risk_mult;
+   double ref_eq = MathMin(bal, eq);
+   string scale_why;
+   double pct = RB_ProfitScaledPct(g_scale, g_lim.initial_balance, bal, GvGet("hwm", bal), ref_eq,
+                                   (int)GvGet("consec_losses", 0.0), scale_why);
+   MqlDateTime sdt;
+   TimeToStruct(sig.confirm_time + PeriodSeconds(TF), sdt);   // decision time = close of the confirming bar
+   RBFeatures feat;
+   RB_MakeFeatures(sig.dir, sig.zone_type, reg.valid ? reg.vol_class : RB_VOL_NORMAL, reg.ranging, sdt.hour, feat);
+   string edge_why;
+   double edge_mult = g_stats.Mult(feat, g_edge, edge_why);
+   double risk_money = RB_FinalRiskMoney(pct, ref_eq, rd.risk_mult, edge_mult, g_scale.max_pct);
+   double candle_range = series.H(sig.rb_idx) - series.L(sig.rb_idx);
+   double wick_ratio   = candle_range > 0.0 ? (sig.rb_high - sig.rb_low) / candle_range : 0.0;
+   double rb_range_atr = sig.atr > 0.0 ? (sig.rb_high - sig.rb_low) / sig.atr : 0.0;
+   double stop_atr     = sig.atr > 0.0 ? plan.risk_dist / sig.atr : 0.0;
+   //--- decision card: every input of the risk decision, readable
+   string card = StringFormat("WHY: zone=%s(hits %d) RB wick=%.0f%% of candle, RB height=%.2f ATR, stop=%.2f ATR | "
+                              "regime=%s VR=%.2f ER=%.2f -> x%.2f rr=%.1f | base=%.3f%% profit-scale=%s -> %.3f%% | "
+                              "edge=%s x%.3f [%s] | final risk=%.2f (%.3f%% of %.2f)",
+                              sig.zone_type == RB_ZONE_FVG ? "FVG" : "OB", sig.zones_hit, wick_ratio * 100.0,
+                              rb_range_atr, stop_atr, rd.reason, reg.vol_ratio, reg.er, rd.risk_mult, cfg.rr,
+                              g_scale.base_pct * 100.0, scale_why, pct * 100.0, edge_why, edge_mult,
+                              RB_EdgeExplain(g_stats, feat, g_edge), risk_money,
+                              ref_eq > 0.0 ? risk_money / ref_eq * 100.0 : 0.0, ref_eq);
+   g_log.Log("DECISION", id, card, "risk inputs");
    ENUM_ORDER_TYPE mtype = plan.dir == RB_DIR_BULL ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double tick_loss = RB_LossPerLot(plan.risk_dist, g_spec, InpCommissionPerLotRT, InpSlippageTicks);
    double calc_loss = RB_LossBetween(_Symbol, mtype, 1.0, plan.entry, plan.sl);
@@ -612,6 +778,17 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    g_meta.Set(ticket, "rng", reg.ranging ? 1.0 : 0.0);
    g_meta.Set(ticket, "rr", cfg.rr);
    g_meta.Set(ticket, "rmul", rd.risk_mult);
+   g_meta.Set(ticket, "pct", pct);
+   g_meta.Set(ticket, "emul", edge_mult);
+   g_meta.Set(ticket, "srs", ScaleReasonCode(scale_why));
+   g_meta.Set(ticket, "zh", sig.zones_hit);
+   g_meta.Set(ticket, "wr", wick_ratio);
+   g_meta.Set(ticket, "rba", rb_range_atr);
+   g_meta.Set(ticket, "sta", stop_atr);
+   g_meta.Set(ticket, "mfe", 0.0);
+   g_meta.Set(ticket, "mae", 0.0);
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      g_meta.Set(ticket, "f" + IntegerToString(d), feat.b[d]);
    // order SENT is logged here; the FILL is logged separately from OnTradeTransaction
    g_log.Log("ORDER_SENT", id, pctx + gctx + " ticket=" + IntegerToString((long)ticket) +
              (tt == ORDER_TIME_SPECIFIED ? " expires=" + TimeToString(exp) : " GTC (EA-side expiry)"), "OK");
@@ -634,6 +811,7 @@ void OnNewBar(void)
    //--- pending order maintenance always runs on closed bars
    ManagePendingOnBar(rates, n);
    Reconcile("BAR");
+   UpdateHighWaterMark();
 
    //--- day limit: existing exposure already at the limit -> cancel pending, block the day
    RBRiskSnapshot snap;
@@ -703,7 +881,10 @@ void OnTick(void)
 
    MqlTick tick;
    if(SymbolInfoTick(_Symbol, tick))
+     {
       ManagePendingOnTick(tick.bid, tick.ask);
+      UpdateExcursions(tick.bid, tick.ask);
+     }
 
    datetime t = iTime(_Symbol, TF, 0);
    if(t == 0 || t == g_last_bar)
@@ -770,13 +951,67 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
      }
    double risk = g_meta.Get(pos, "risk");
    double rr   = risk > 0.0 ? net / risk : 0.0;
-   g_log.Log("CLOSED", id, StringFormat("position %I64u exit=%s net=%.2f risk=%.2f R=%.3f", pos,
-             DoubleToString(px, _Digits), net, risk, rr), "broker deals");
-   g_log.Trade(t_open, t_close, (int)g_meta.Get(pos, "dir"), g_meta.Get(pos, "entry"), fill,
-               g_meta.Get(pos, "sl"), g_meta.Get(pos, "tp"), vol, risk, net, rr, id,
-               g_meta.Get(pos, "atr"), (int)g_meta.Get(pos, "zty"), g_meta.Get(pos, "rr"), InpStopMode, px,
-               (int)g_meta.Get(pos, "vc"), g_meta.Get(pos, "rng") > 0.5, g_meta.Get(pos, "vr"),
-               g_meta.Get(pos, "er"), g_meta.Get(pos, "rmul"));
+   int dir     = (int)g_meta.Get(pos, "dir");
+   double rdist = MathAbs(g_meta.Get(pos, "entry") - g_meta.Get(pos, "sl"));
+
+   RBTradeRow row;
+   row.open_time       = t_open;
+   row.close_time      = t_close;
+   row.signal_time     = (datetime)g_meta.Get(pos, "bar") + PeriodSeconds(TF);
+   row.dir             = dir;
+   row.planned_entry   = g_meta.Get(pos, "entry");
+   row.fill_price      = fill;
+   row.sl              = g_meta.Get(pos, "sl");
+   row.tp              = g_meta.Get(pos, "tp");
+   row.volume          = vol;
+   row.risk_money      = risk;
+   row.net             = net;
+   row.r               = rr;
+   row.signal_id       = id;
+   row.atr             = g_meta.Get(pos, "atr");
+   row.zone_type       = (int)g_meta.Get(pos, "zty");
+   row.rr              = g_meta.Get(pos, "rr");
+   row.stop_mode       = InpStopMode;
+   row.exit_price      = px;
+   row.vol_class       = (int)g_meta.Get(pos, "vc");
+   row.ranging         = g_meta.Get(pos, "rng") > 0.5;
+   row.vol_ratio       = g_meta.Get(pos, "vr");
+   row.er              = g_meta.Get(pos, "er");
+   row.risk_mult       = g_meta.Get(pos, "rmul");
+   row.exit_reason     = ExitReasonText(HistoryDealGetInteger(trans.deal, DEAL_REASON));
+   row.mfe_r           = rdist > 0.0 ? g_meta.Get(pos, "mfe") / rdist : 0.0;
+   row.mae_r           = rdist > 0.0 ? g_meta.Get(pos, "mae") / rdist : 0.0;
+   row.zones_hit       = (int)g_meta.Get(pos, "zh");
+   row.wick_ratio      = g_meta.Get(pos, "wr");
+   row.rb_range_atr    = g_meta.Get(pos, "rba");
+   row.stop_atr        = g_meta.Get(pos, "sta");
+   row.fill_delay_bars = (int)((t_open - row.signal_time) / PeriodSeconds(TF));
+   row.risk_pct        = g_meta.Get(pos, "pct");
+   row.edge_mult       = g_meta.Get(pos, "emul");
+   row.scale_reason    = ScaleReasonText((int)g_meta.Get(pos, "srs"));
+
+   //--- outcome explanation: what happened and under which conditions
+   RBFeatures feat;
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      feat.b[d] = (int)g_meta.Get(pos, "f" + IntegerToString(d));
+   string cond = "";
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      cond += (d > 0 ? (string)" " : (string)"") + RB_DimText(d) + "=" + RB_BucketText(d, feat.b[d]);
+   string outcome = rr > 0.0 ? "WIN" : "LOSS";
+   string story = StringFormat("%s %.2fR by %s | went +%.2fR / %.2fR before exit | %s | zone hits=%d wick=%.0f%% "
+                               "RB=%.2f ATR stop=%.2f ATR | filled after %d bars | risk %.3f%% (%s, edge x%.2f, regime x%.2f)",
+                               outcome, rr, row.exit_reason, row.mfe_r, row.mae_r, cond, row.zones_hit,
+                               row.wick_ratio * 100.0, row.rb_range_atr, row.stop_atr, row.fill_delay_bars,
+                               row.risk_pct * 100.0, row.scale_reason, row.edge_mult, row.risk_mult);
+   g_log.Log("CLOSED", id, StringFormat("position %I64u exit=%s net=%.2f risk=%.2f", pos,
+             DoubleToString(px, _Digits), net, risk), story);
+   g_log.Trade(row);
+
+   //--- learn from the closed trade (past trades only -> no lookahead)
+   g_stats.Add(feat, rr);
+   SaveEdgeStats();
+   GvSet("consec_losses", net < 0.0 ? GvGet("consec_losses", 0.0) + 1.0 : 0.0);
+   UpdateHighWaterMark();
    g_meta.Delete(pos);
   }
 

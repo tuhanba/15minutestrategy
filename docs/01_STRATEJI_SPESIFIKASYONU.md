@@ -266,3 +266,95 @@ Her rejim için işlem açılıp açılmayacağı, risk çarpanı ve RR override
 5. Politika OOS'ta ölçüm koşusundan iyi değilse kullanılmaz.
 
 Bir rejimde 30'dan az işlem varsa o rejim için karar verilmez. Varsayılan politika korunur.
+
+## 13. Açıklanabilirlik ve adaptif risk (v0.4)
+
+Amaç: Bot "sinyal geldi, işlem açtım" demekle kalmamalı. Her kararın **neye dayandığı** ve her sonucun **hangi koşullarda** oluştuğu kayıtlı olmalı.
+
+### 13.1 Karar kartı (her sinyalde journal'da `DECISION`)
+
+```
+WHY: zone=FVG(hits 2) RB wick=65% of candle, RB height=1.10 ATR, stop=0.80 ATR |
+     regime=HIGH VR=1.72 ER=0.41 -> x0.50 rr=6.0 | base=0.250% profit-scale=SCALED -> 0.298% |
+     edge=EDGE x1.120 [dir=LONG n=31 avgR=0.45 contrib=0.027 | zone=FVG ... ] |
+     final risk=167.20 (0.167% of 100,450.00)
+```
+
+Sırasıyla:
+- **Setup:** bölge, RB ve stop ölçüleri.
+- **Rejim:** volatilite ve yataylık değerleri, bunlardan çıkan risk çarpanı.
+- **Kâr ölçeklemesi:** temel risk ve kâra göre yükseltilmiş risk.
+- **Kenar:** her koşulun geçmiş işlem sayısı, ortalama R'si ve risk çarpanına katkısı.
+- **Sonuç:** nihai risk.
+
+Ardından `ORDER_SENT` veya `SIGNAL_REJECTED <sebep>` satırı gelir.
+
+### 13.2 Sonuç hikâyesi (her kapanışta journal'da `CLOSED`, trades.csv'de bir satır)
+
+```
+WIN 5.82R by TP | went +6.05R / -0.31R before exit | dir=LONG zone=FVG vol=NORMAL range=TREND session=H06-11 |
+zone hits=2 wick=65% RB=1.10 ATR stop=0.80 ATR | filled after 2 bars | risk 0.298% (SCALED, edge x1.12, regime x1.00)
+```
+
+trades.csv'deki ek alanlar:
+- `exit_reason` (SL/TP/EA/MANUAL/STOP_OUT)
+- `mfe_r` ve `mae_r`: işlem açıkken lehte ve aleyhte gidilen en uzak mesafe, R cinsinden
+- `session`, `hour`, `weekday`, `zones_hit`, `wick_ratio`, `rb_range_atr`, `stop_atr`, `fill_delay_bars`
+- `risk_pct`, `edge_mult`, `scale_reason`
+
+`analyze_trades.py` bunlardan şunları üretir:
+- her koşul için işlem sayısı, kazanma oranı ve expectancy tabloları
+- kazananlarla kaybedenlerin sayısal ortalamaları
+- önce +1R / +2R / +3R'ye gidip sonra stop olan kaybedenlerin oranı
+- adaptif boyutlamanın etkisi: gerçek net sonuç ile aynı işlemlerin sabit riskle getireceği sonucun karşılaştırması
+
+**Uyarı:** Bu tablolar **korelasyon** gösterir, nedensellik değil. 30'dan az işlemli kovalar `(small)` olarak işaretlenir.
+
+### 13.3 Kâra göre risk artırma (bounded anti-martingale)
+
+```
+profit = balance − başlangıç bakiyesi
+pct    = base_pct + profit_share × max(0, profit) / min(balance, equity)     (varsayılan share = %2)
+pct    = min(pct, max_pct)                                                      (varsayılan cap = %0.5)
+pct    = base_pct   eğer balance < tepe × (1 − %2)  veya  art arda ≥ 3 kayıp
+```
+
+Örnek: Hesap 100 000'den 105 000'e çıktıysa ek risk 5 000 × %2 = 100 $ olur. İşlem başına risk 262.5 $ + 100 $ ≈ %0.345.
+- Ek risk **yalnız gerçekleşmiş kârdan** ödenir.
+- Kayıpta veya tepe noktasından düşüşte risk otomatik olarak temele döner.
+- Risk hiçbir zaman başlangıç riskinin altına inmez, `max_pct`'yi de aşmaz.
+- Günlük limit ve açık risk kontrolleri (§9) her zaman en son söz sahibidir.
+
+### 13.4 "Tutan yönde" riski artırma (kenar ağırlıklandırma)
+
+Kapanan her işlem beş boyutta istatistiğe eklenir:
+- yön (LONG/SHORT)
+- bölge (FVG/OB)
+- volatilite sınıfı
+- yatay/trend
+- seans (sunucu saati 0–5, 6–11, 12–17, 18–23)
+
+Yeni sinyal için:
+
+```
+shrunk_d = Σ R(aynı kovadaki geçmiş işlemler) / (n + prior)        prior = 20 (küçük örneklemi 0'a çeker)
+mult     = clamp(1 + gain × Σ_d shrunk_d, 0.5, 1.5)                 gain = 0.15
+```
+
+- 40 kapanmış işlemden önce mult = 1, yani ısınma dönemi.
+- Yalnız **kapanmış geçmiş** işlemler kullanılır; gelecek veri kullanılmaz.
+- Örnek: geçmiş LONG işlemleri ortalama +1R getirdiyse yeni LONG'larda risk artar. SHORT'lar kaybettirdiyse azalır.
+
+Riskler:
+- **Aşırı uyum:** geçmişte şans eseri iyi giden kova ödüllendirilebilir. Shrinkage ve 0.5–1.5 sınırı bunu yumuşatır ama ortadan kaldırmaz.
+- **Rejim değişimi:** geçmişte işe yarayan koşul ileride yaramayabilir.
+- **Prop limiti:** kârın artırdığı risk art arda kayıplarla günlük limite daha hızlı yaklaşır. Kayıp serisi freni ve günlük guard bunu sınırlar.
+
+### 13.5 Doğrulama
+
+`RBOTE_6R_fixed10price_regime` (sabit risk) ile `RBOTE_6R_fixed10price_adaptive` aynı dönemde çalıştırılır.
+Adaptif koşu yalnız şu iki şart birlikte sağlanırsa kullanılır:
+- OOS'ta net sonuç **ve** Monte Carlo DD p95 daha iyi ya da kabul edilebilir.
+- Günlük limit ihlali yok.
+
+Aksi halde sabit risk kullanılır.

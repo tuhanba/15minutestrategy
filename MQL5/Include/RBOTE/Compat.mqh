@@ -32,6 +32,11 @@ inline double MathSqrt(double x)            { return std::sqrt(x); }
 inline bool   MathIsValidNumber(double x)   { return std::isfinite(x); }
 
 inline string IntegerToString(long long v)  { return std::to_string(v); }
+inline int StringFind(const string &s, const string &sub, int start = 0)
+  {
+   std::string::size_type p = s.find(sub, (std::string::size_type)start);
+   return p == std::string::npos ? -1 : (int)p;
+  }
 inline string DoubleToString(double v, int digits)
   {
    char buf[64];

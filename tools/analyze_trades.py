@@ -43,6 +43,21 @@ class Trade:
     regime: str = ""
     vol_ratio: float = 0.0
     risk_mult: float = 1.0
+    er: float = 0.0
+    zone_type: int = 0
+    exit_reason: str = ""
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
+    session: str = ""
+    weekday: int = -1
+    zones_hit: int = 0
+    wick_ratio: float = 0.0
+    rb_range_atr: float = 0.0
+    stop_atr: float = 0.0
+    fill_delay_bars: int = 0
+    risk_pct: float = 0.0
+    edge_mult: float = 1.0
+    scale_reason: str = ""
 
 
 def _parse_time(text: str) -> datetime:
@@ -76,6 +91,21 @@ def load_trades(path: Path) -> list[Trade]:
                     regime=(row.get("regime") or "").strip(),
                     vol_ratio=float(row.get("vol_ratio") or 0.0),
                     risk_mult=float(row.get("risk_mult") or 1.0),
+                    er=float(row.get("er") or 0.0),
+                    zone_type=int(row.get("zone_type") or 0),
+                    exit_reason=(row.get("exit_reason") or "").strip(),
+                    mfe_r=float(row.get("mfe_r") or 0.0),
+                    mae_r=float(row.get("mae_r") or 0.0),
+                    session=(row.get("session") or "").strip(),
+                    weekday=int(row.get("weekday") or -1),
+                    zones_hit=int(row.get("zones_hit") or 0),
+                    wick_ratio=float(row.get("wick_ratio") or 0.0),
+                    rb_range_atr=float(row.get("rb_range_atr") or 0.0),
+                    stop_atr=float(row.get("stop_atr") or 0.0),
+                    fill_delay_bars=int(row.get("fill_delay_bars") or 0),
+                    risk_pct=float(row.get("risk_pct") or 0.0),
+                    edge_mult=float(row.get("edge_mult") or 1.0),
+                    scale_reason=(row.get("scale_reason") or "").strip(),
                 )
             )
     trades.sort(key=lambda t: t.close_time)
@@ -212,6 +242,75 @@ def volatility_regimes(trades: Sequence[Trade]) -> dict[str, tuple[int, float]]:
     return group_expectancy(trades, label)
 
 
+# --- why: winners vs losers ---------------------------------------------------
+
+WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+CATEGORICAL = [
+    ("direction", lambda t: "LONG" if t.direction > 0 else "SHORT"),
+    ("zone", lambda t: "OB" if t.zone_type == 1 else "FVG"),
+    ("zone confluence (hits)", lambda t: str(t.zones_hit) if t.zones_hit < 3 else "3+"),
+    ("regime", lambda t: t.regime or "n/a"),
+    ("session (server hour)", lambda t: t.session or "n/a"),
+    ("weekday", lambda t: WEEKDAYS[t.weekday] if 0 <= t.weekday < 7 else "n/a"),
+    ("exit reason", lambda t: t.exit_reason or "n/a"),
+    ("risk scaling", lambda t: t.scale_reason or "n/a"),
+]
+
+NUMERIC = [
+    ("wick / candle", lambda t: t.wick_ratio),
+    ("RB height (ATR)", lambda t: t.rb_range_atr),
+    ("stop (ATR)", lambda t: t.stop_atr),
+    ("volatility ratio", lambda t: t.vol_ratio),
+    ("efficiency ratio", lambda t: t.er),
+    ("fill delay (bars)", lambda t: float(t.fill_delay_bars)),
+    ("max adverse excursion (R)", lambda t: t.mae_r),
+]
+
+
+def bucket_table(trades: Sequence[Trade], key) -> list[tuple[str, int, float, float]]:
+    groups: dict[str, list[Trade]] = {}
+    for t in trades:
+        groups.setdefault(key(t), []).append(t)
+    rows = []
+    for k, ts in sorted(groups.items()):
+        wins = sum(1 for t in ts if t.net > 0)
+        rows.append((k, len(ts), wins / len(ts), statistics.fmean(t.r for t in ts)))
+    return rows
+
+
+def why_section(trades: Sequence[Trade], base_risk_fraction: float, start_balance: float, min_n: int = 30) -> list[str]:
+    """Which conditions winners and losers had. Correlation only - not proof of cause."""
+    out = ["### Why trades won or lost (conditions at entry)", ""]
+    if not any(t.exit_reason or t.session for t in trades):
+        out.append("Trade file has no feature columns (older EA version).")
+        return out
+    out.append(f"Buckets with fewer than {min_n} trades are marked `(small)`: do not draw conclusions from them.")
+    for name, key in CATEGORICAL:
+        out += ["", f"| {name} | trades | win % | expectancy R |", "|---|---|---|---|"]
+        for k, n, wr, e in bucket_table(trades, key):
+            out.append(f"| {k}{' (small)' if n < min_n else ''} | {n} | {wr:.1%} | {e:.3f} |")
+    winners = [t for t in trades if t.net > 0]
+    losers = [t for t in trades if t.net <= 0]
+    out += ["", "| feature (mean) | winners | losers |", "|---|---|---|"]
+    for name, f in NUMERIC:
+        w = statistics.fmean(f(t) for t in winners) if winners else float("nan")
+        lo = statistics.fmean(f(t) for t in losers) if losers else float("nan")
+        out.append(f"| {name} | {_fmt(w, '.3f')} | {_fmt(lo, '.3f')} |")
+    if losers:
+        out += ["", "Losers that first moved in favour (max favourable excursion before the stop):", ""]
+        for lvl in (1.0, 2.0, 3.0):
+            share = sum(1 for t in losers if t.mfe_r >= lvl) / len(losers)
+            out.append(f"- reached +{lvl:.0f}R first: {share:.1%}")
+    flat = sum(t.r for t in trades) * base_risk_fraction * start_balance
+    actual = sum(t.net for t in trades)
+    out += ["", "Effect of adaptive sizing (profit scaling x regime x edge):", "",
+            f"- actual net: {actual:,.2f}",
+            f"- same trades at flat {base_risk_fraction:.2%} of start balance: {flat:,.2f}",
+            f"- difference: {actual - flat:,.2f} ({'sizing helped' if actual > flat else 'sizing did not help'})"]
+    return out
+
+
 # --- acceptance --------------------------------------------------------------
 
 @dataclass
@@ -303,6 +402,8 @@ def build_report(runs: dict[str, list[Trade]], oos_start: datetime | None, risk_
             verdicts.append("| volatility (ATR tercile) | trades | expectancy R |")
             verdicts.append("|---|---|---|")
             verdicts.extend(f"| {k} | {n} | {e:.3f} |" for k, (n, e) in regimes.items())
+        verdicts.append("")
+        verdicts.extend(why_section(trades, risk_fraction, start_balance))
         dirs = group_expectancy(trades, lambda t: "long" if t.direction > 0 else "short")
         verdicts.append("")
         verdicts.append("| direction | trades | expectancy R |")

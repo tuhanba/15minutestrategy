@@ -41,3 +41,6 @@ InpTradeRange=true
 InpRiskMultRange=0.5
 InpRRRange=0
 InpLookbackBars=1200
+; Adaptive risk OFF: flat risk so the effect of scaling can be measured separately
+InpScaleEnabled=false
+InpEdgeEnabled=false

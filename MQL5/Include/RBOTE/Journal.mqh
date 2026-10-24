@@ -4,7 +4,46 @@
 #ifndef RBOTE_JOURNAL_MQH
 #define RBOTE_JOURNAL_MQH
 
-#include "Regime.mqh"
+#include "Adaptive.mqh"
+
+//--- everything known about a closed trade: setup, conditions, sizing, outcome
+struct RBTradeRow
+  {
+   datetime open_time;
+   datetime close_time;
+   datetime signal_time;
+   int      dir;
+   double   planned_entry;
+   double   fill_price;
+   double   sl;
+   double   tp;
+   double   volume;
+   double   risk_money;
+   double   net;
+   double   r;
+   string   signal_id;
+   double   atr;
+   int      zone_type;
+   double   rr;
+   int      stop_mode;
+   double   exit_price;
+   int      vol_class;
+   bool     ranging;
+   double   vol_ratio;
+   double   er;
+   double   risk_mult;
+   string   exit_reason;
+   double   mfe_r;
+   double   mae_r;
+   int      zones_hit;
+   double   wick_ratio;
+   double   rb_range_atr;
+   double   stop_atr;
+   int      fill_delay_bars;
+   double   risk_pct;
+   double   edge_mult;
+   string   scale_reason;
+  };
 
 class CRBJournal
   {
@@ -67,27 +106,33 @@ public:
      }
 
    //--- one row per closed position (input for tools/analyze_trades.py)
-   void              Trade(datetime open_time, datetime close_time, int dir, double planned_entry,
-                           double fill_price, double sl, double tp, double volume,
-                           double risk_money, double net, double r, const string signal_id,
-                           double atr, int zone_type, double rr, int stop_mode, double exit_price,
-                           int vol_class, bool ranging, double vol_ratio, double er, double risk_mult)
+   void              Trade(const RBTradeRow &t)
      {
       if(!m_enabled)
          return;
       int h = OpenAppend(m_trades_file,
-                         "open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;atr;zone_type;rr;stop_mode;exit_price;regime;vol_ratio;er;risk_mult");
+                         (string)"open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;" +
+                         "atr;zone_type;rr;stop_mode;exit_price;regime;vol_ratio;er;risk_mult;" +
+                         "exit_reason;mfe_r;mae_r;session;hour;weekday;zones_hit;wick_ratio;rb_range_atr;stop_atr;" +
+                         "fill_delay_bars;risk_pct;edge_mult;scale_reason");
       if(h == INVALID_HANDLE)
          return;
-      FileWrite(h, TimeToString(open_time, TIME_DATE | TIME_MINUTES),
-                TimeToString(close_time, TIME_DATE | TIME_MINUTES),
-                dir, DoubleToString(planned_entry, _Digits), DoubleToString(fill_price, _Digits),
-                DoubleToString(sl, _Digits), DoubleToString(tp, _Digits), DoubleToString(volume, 2),
-                DoubleToString(risk_money, 2), DoubleToString(net, 2), DoubleToString(r, 4),
-                signal_id, DoubleToString(atr, _Digits), zone_type, DoubleToString(rr, 2), stop_mode,
-                DoubleToString(exit_price, _Digits),
-                (vol_class < 0 ? (string)"UNKNOWN" : RB_VolText(vol_class)) + (ranging ? "+RANGE" : ""),
-                DoubleToString(vol_ratio, 3), DoubleToString(er, 3), DoubleToString(risk_mult, 2));
+      MqlDateTime dt;
+      TimeToStruct(t.signal_time, dt);
+      FileWrite(h, TimeToString(t.open_time, TIME_DATE | TIME_MINUTES),
+                TimeToString(t.close_time, TIME_DATE | TIME_MINUTES),
+                t.dir, DoubleToString(t.planned_entry, _Digits), DoubleToString(t.fill_price, _Digits),
+                DoubleToString(t.sl, _Digits), DoubleToString(t.tp, _Digits), DoubleToString(t.volume, 2),
+                DoubleToString(t.risk_money, 2), DoubleToString(t.net, 2), DoubleToString(t.r, 4),
+                t.signal_id, DoubleToString(t.atr, _Digits), t.zone_type, DoubleToString(t.rr, 2), t.stop_mode,
+                DoubleToString(t.exit_price, _Digits),
+                (t.vol_class < 0 ? (string)"UNKNOWN" : RB_VolText(t.vol_class)) + (t.ranging ? "+RANGE" : ""),
+                DoubleToString(t.vol_ratio, 3), DoubleToString(t.er, 3), DoubleToString(t.risk_mult, 2),
+                t.exit_reason, DoubleToString(t.mfe_r, 2), DoubleToString(t.mae_r, 2),
+                RB_SessionText(RB_SessionBucket(dt.hour)), dt.hour, dt.day_of_week, t.zones_hit,
+                DoubleToString(t.wick_ratio, 3), DoubleToString(t.rb_range_atr, 3), DoubleToString(t.stop_atr, 3),
+                t.fill_delay_bars, DoubleToString(t.risk_pct * 100.0, 3), DoubleToString(t.edge_mult, 3),
+                t.scale_reason);
       FileClose(h);
      }
   };

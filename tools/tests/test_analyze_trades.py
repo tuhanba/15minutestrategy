@@ -88,3 +88,28 @@ def test_regime_breakdown(tmp_path):
     assert [t.regime for t in trades] == ["HIGH", "NORMAL+RANGE"]
     rep = at.build_report({"x": trades}, None, 0.0025, 100000.0, 0.01, at.Criteria())
     assert "| HIGH | 1 | -1.000 |" in rep and "| NORMAL+RANGE | 1 | 6.000 |" in rep
+
+
+FULL_HEADER = (HEADER + ";regime;vol_ratio;er;risk_mult;exit_reason;mfe_r;mae_r;session;hour;weekday;zones_hit;"
+               "wick_ratio;rb_range_atr;stop_atr;fill_delay_bars;risk_pct;edge_mult;scale_reason")
+
+
+def test_why_section(tmp_path):
+    p = tmp_path / "t.csv"
+    rows = [FULL_HEADER]
+    # 2 winners in London session with FVG, 2 losers in Asia with OB; one loser first reached +3.2R
+    for i, (net, sess, zt, mfe, reason) in enumerate([
+        (1500, "H06-11", 0, 6.1, "TP"), (1500, "H06-11", 0, 6.0, "TP"),
+        (-250, "H00-05", 1, 3.2, "SL"), (-250, "H00-05", 1, 0.4, "SL"),
+    ]):
+        rows.append(f"2024.01.0{i + 1} 10:00;2024.01.0{i + 1} 12:00;1;100;100;99;106;1.00;250;{net};{net / 250:.4f};"
+                    f"RBOTE|B|{i};1.0;{zt};6.00;0;106;NORMAL;1.0;0.5;1.00;{reason};{mfe};-0.3;{sess};9;2;1;"
+                    f"0.6;1.2;0.8;2;0.250;1.000;BASE")
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    trades = at.load_trades(p)
+    assert trades[0].session == "H06-11" and trades[2].mfe_r == 3.2
+    lines = "\n".join(at.why_section(trades, 0.0025, 100000.0))
+    assert "| H06-11 (small) | 2 | 100.0% | 6.000 |" in lines
+    assert "| OB (small) | 2 | 0.0% | -1.000 |" in lines
+    assert "reached +3R first: 50.0%" in lines
+    assert "same trades at flat 0.25% of start balance: 2,500.00" in lines
