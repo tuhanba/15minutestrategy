@@ -30,7 +30,7 @@ Görselde yatay çizgi yaklaşık 20 mum uzunluğunda; risk/ödül kutuları ≈
 | Ana trend (HTF) | Her HTF'de son onaylı fraktal yapı: son kapanış son onaylı swing high üstündeyse BULL, son onaylı swing low altındaysa BEAR, değilse önceki durum | HTF listesi H1+H4 (`dt_htfs`); birleşim: **hepsi aynı yönde** olmalı (ALL) — alternatif MAJORITY |
 | Karşı yönlü hareket (ana trend BEAR) | Onaylı swing low **A** → A'dan sonraki en yüksek onaylı swing high **B**; hareket boyu `pB − pA ≥ dt_min_leg_atr × ATR14` ve hareket bir **karşı yönlü kırılım** içerir: A ile B arasında bir mum, A'dan önceki son onaylı LTF swing high'ın **üstünde kapanır** | `dt_min_leg_atr = 1.0`, `dt_swing_n = 2` (VARSAYIM) |
 | Ana trend BULL | Ayna: onaylı swing high A → en düşük onaylı swing low B, A'dan önceki son swing low altında kapanış | |
-| Yatay uzatma | C = (tB + L, pB), L mum. Kaynak "20 pip" diyor, ama yatay çizgi zaman ekseninde uzanır ve görselde ≈ 20 **mum**. Varsayılan `L = 20` mum (`dt_ext_bars`). "20 pip" fiyat olarak okunursa (XAUUSD 1 pip = 0.10 → 2.00) yatay çizgiye uygulanamaz | **Kullanıcı onayı bekliyor**; 10/20/30 mum duyarlılık testi |
+| Yatay uzatma | C = (tB + L, pB), **L = 20 mum** (kullanıcı onayı 2026-10-25: "20 pip" = mum sayısı) | `dt_ext_bars = 20`; 10/30 yalnız duyarlılık raporu |
 | Eğimli çizgi | A'dan C'ye doğru: `line(t) = pA + (pB − pA) · (t − tA) / (tC − tA)`; t = bar indeksi | |
 | Üçgenin ömrü | tB'nin onaylandığı bardan (`tB + swing_n`) tC'ye kadar; tC'den sonra kırılım olmazsa EXPIRED | |
 | Geçersizlik | Ana trend yönü değişirse, ya da yeni onaylı daha yüksek swing high (BEAR durumda) B'yi geçerse yapı yenilenir (yeni üçgen) | |
@@ -51,9 +51,9 @@ Ana trend BULL: ayna. A onaylı tepe, B en düşük onaylı dip; eğimli çizgi 
 | | Varsayılan | Alternatifler |
 |---|---|---|
 | Giriş | Sinyal barının kapanışından sonraki ilk tick'te **piyasa emri** (EA: yeni barın ilk tick'i) | `dt_entry = RETEST_LIMIT` (çizgi seviyesine limit) — test varyantı |
-| Stop (satış) | Kırılım mumunun **tepesi + tampon** (`dt_sl_mode = BREAK_CANDLE`) | `EXTREME` (B + tampon), `ATR` (k × ATR) |
+| Stop | **Kırılımın başladığı noktadan**, duruma göre (kullanıcı 2026-10-25). Adaylar: `BREAK_START` = kırılım barından önceki son yerel tepe (satış) / dip (alış) + tampon; `BREAK_CANDLE` = kırılım mumunun tepesi/dibi + tampon; `EXTREME` = B ± tampon; `ATR` = k × ATR | **`ADAPTIVE` (varsayılan aday):** `BREAK_START` seviyesinden başlayıp stop mesafesi `[dt_min_stop_atr, dt_max_stop_atr] × ATR` aralığına düşen ilk yapısal seviye (BREAK_START → BREAK_CANDLE → EXTREME sırası); hiçbiri uymazsa işlem yok. Sabit modlar ile ADAPTIVE arasındaki seçim yalnız IS'te |
 | Tampon | `max(dt_sl_buffer_price, spread)` | varsayılan 0.30 |
-| Hedef | `entry ∓ dt_rr × risk`, `dt_rr = 2.0` (görsel ≈ 2.1) | 1.5 / 3 |
+| Hedef | `entry ∓ dt_rr × risk`, **`dt_rr = 1.5`** (kullanıcı: "40'a 60" = risk 40 / kazanç 60) | 2.0 yalnız duyarlılık |
 | Reddetme | stop < broker min / < 2×spread, stop > `dt_max_stop_atr × ATR` (varsayılan 3) | |
 
 Lot ve risk RBOTE ile aynı formül ve aynı hesap düzeyi korumalar (`RB_CalcLots`, `RB_CheckNewOrder`).
