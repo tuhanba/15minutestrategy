@@ -67,6 +67,9 @@ struct Options
    RBDtbsConfig dcfg;
    int htf_offset_h = 2;         // broker clock - UTC for H1/H4 bucketing (EET winter = 2)
    double min_stop_spread_mult = 2.0;
+   int digits = 2;               // symbol spec (default XAUUSD: 0.01 tick, 1 $ per tick per lot)
+   double tick_size = 0.01;
+   double tick_value = 1.0;
    std::string label_out = "";   // DTBS: write one independent outcome row per signal and exit
    int label_horizon_min = 14400; // label: max holding time (minutes) before the open trade is marked to market
    double swap_long = 0.0;       // $ per lot per night (negative = cost), charged at the rollover hour
@@ -1006,10 +1009,10 @@ struct Engine
    // ------------------------------------------------------------------
    void run()
      {
-      spec.digits = 2;
-      spec.point = 0.01;
-      spec.tick_size = 0.01;
-      spec.tick_value_loss = 1.0;   // 100 oz contract, USD account
+      spec.digits = o.digits;
+      spec.point = o.tick_size;
+      spec.tick_size = o.tick_size;
+      spec.tick_value_loss = o.tick_value;   // XAUUSD: 100 oz contract, USD account
       spec.vol_min = 0.01;
       spec.vol_max = 100.0;
       spec.vol_step = 0.01;
@@ -1154,6 +1157,7 @@ static void usage()
        "     --dt-sl adaptive|break_start|break_candle|extreme|atr --dt-buffer 0.30 --dt-sl-atr 1.5\n"
        "     --dt-min-stop-atr 0.5 --dt-max-stop-atr 3 --dt-htf all|majority --dt-swing 2 --dt-htf-swing 2\n"
        "     --dt-leg-atr 1.0 --dt-max-leg 200 --htf-offset 2 --dt-ctx on|off\n"
+       "  symbol: --digits 2 --tick-size 0.01 --tick-value 1 (per lot per tick; XAGUSD: 3 0.001 5)\n"
        "     --label-out FILE [--label-horizon 14400]  one independent outcome row per DTBS signal, then exit");
 }
 
@@ -1278,6 +1282,9 @@ int main(int argc, char **argv)
       else if(a == "--htf-offset") o.htf_offset_h = (int)num();
       else if(a == "--label-out") o.label_out = next();
       else if(a == "--dt-ctx") o.dcfg.ctx_filter = next() == "on";
+      else if(a == "--digits") o.digits = (int)num();
+      else if(a == "--tick-size") o.tick_size = num();
+      else if(a == "--tick-value") o.tick_value = num();
       else if(a == "--label-horizon") o.label_horizon_min = (int)num();
       else
         {
