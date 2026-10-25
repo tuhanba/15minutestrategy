@@ -1,7 +1,11 @@
 //+------------------------------------------------------------------+
 //| RBOTE_EA.mq5                                                     |
-//| XAUUSD M15: PD Array (FVG / OB) -> Rejection Block -> 0.79 OTE    |
-//| limit entry, fixed or structural stop, 6R (or 5R) target.        |
+//| XAUUSD M15, two strategies in one EA (spec 02 section 5):        |
+//|  RBOTE (sid 1, InpMagic): PD Array (FVG / OB) -> Rejection Block |
+//|   -> 0.79 OTE limit entry, fixed or structural stop, 6R target.  |
+//|  DTBS (sid 2, InpMagicDTBS): HTF trend + triangle break (A-B-C,  |
+//|   20-bar extension), market entry, adaptive stop, 1.5R target.   |
+//| Risk and firm limits are account-wide; no hedging on the symbol. |
 //|                                                                  |
 //| Defaults are SAFE: outside the tester every account (also demo / |
 //| prop evaluation) needs InpLiveConfirmLogin = its login; real     |
@@ -10,7 +14,7 @@
 //+------------------------------------------------------------------+
 #property copyright "RBOTE"
 #property version   "1.00"
-#property description "M15 PD Array + Rejection Block + OTE 0.79. Demo/backtest by default."
+#property description "M15 RBOTE (PD Array + Rejection Block + OTE 0.79) + DTBS (trend break). Demo/backtest by default."
 
 #include <Trade/Trade.mqh>
 #include <RBOTE/RejectionBlock.mqh>
@@ -21,13 +25,19 @@
 #include <RBOTE/Journal.mqh>
 #include <RBOTE/Regime.mqh>
 #include <RBOTE/Adaptive.mqh>
+#include <RBOTE/DTBS.mqh>
 
 //--- inputs ---------------------------------------------------------
 input group "Safety / mode"
 input bool   InpAllowLiveTrading   = false;   // Allow REAL accounts (default: refused)
 input long   InpLiveConfirmLogin   = 0;       // REQUIRED on every non-tester account (demo/prop too): its login
 input bool   InpPropRulesVerified  = false;   // Real account: prop-firm rules verified by you
-input long   InpMagic              = 7915790; // Magic number
+input long   InpMagic              = 7915790; // Magic number (RBOTE)
+
+input group "Strategies"
+input bool   InpEnableRBOTE        = true;    // Strategy 1: RBOTE (rejection block + OTE limit)
+input bool   InpEnableDTBS         = true;    // Strategy 2: DTBS (dynamic trend break, market entry)
+input long   InpMagicDTBS          = 7915791; // Magic number (DTBS), must differ from InpMagic
 
 input group "PD arrays (M15)"
 input bool   InpUseFVG             = true;    // Use Fair Value Gaps
@@ -57,17 +67,36 @@ input double InpMinStopSpreadMult  = 2.0;     // Stop >= mult x current spread
 input double InpMaxSpreadPrice     = 0.0;     // Max spread for new orders (price, 0 = off)
 input int    InpOrderExpiryBars    = 8;       // Pending order lifetime in M15 bars
 
+input group "DTBS - Dynamic Trend Break (spec docs/02, ASSUMPTIONS marked there)"
+input int    InpDtbsExtBars        = 20;      // Horizontal extension B -> C in M15 bars (confirmed: 20)
+input ENUM_RB_DTBS_BREAK_DIRS InpDtbsBreakDirs = RB_DTBS_BOTH;          // Break directions that signal
+input ENUM_RB_DTBS_CONFIRM    InpDtbsConfirm   = RB_DTBS_CONFIRM_CLOSE; // Break confirmation (close / wick)
+input ENUM_RB_DTBS_SL_MODE    InpDtbsSlMode    = RB_DTBS_SL_ADAPTIVE;   // Stop mode (ADAPTIVE: from the break start)
+input double InpDtbsSlBuffer       = 0.30;    // Stop buffer, price (buffer = max(this, spread))
+input double InpDtbsSlAtrMult      = 1.5;     // ATR stop mode: k x ATR
+input double InpDtbsMinStopATR     = 0.5;     // ADAPTIVE: min stop distance in ATR
+input double InpDtbsMaxStopATR     = 3.0;     // Max stop distance in ATR (0 = off)
+input double InpDtbsRR             = 1.5;     // Target in R (confirmed: 1.5)
+input ENUM_RB_DTBS_HTF_AGREE  InpDtbsHtfAgree  = RB_DTBS_HTF_ALL;       // H1 + H4 main trend agreement
+input int    InpDtbsSwingN         = 2;       // M15 fractal strength (ASSUMPTION 2)
+input int    InpDtbsHtfSwingN      = 2;       // H1/H4 fractal strength for the main trend
+input double InpDtbsMinLegATR      = 1.0;     // Counter leg pB - pA >= x ATR (ASSUMPTION 1.0)
+input int    InpDtbsMaxLegBars     = 200;     // A searched at most this many bars before B
+input int    InpDtbsAtrPeriod      = 14;      // ATR period
+input int    InpDtbsHtfBars        = 600;     // Closed H1 and H4 bars copied for the main trend
+input double InpDtbsRiskPct        = 0.25;    // DTBS risk per trade, % of min(balance, equity)
+
 input group "Risk (test values, NOT prop-firm rules)"
-input double InpRiskPct            = 0.25;    // Risk per trade, % of min(balance, equity)
+input double InpRiskPct            = 0.25;    // RBOTE risk per trade, % of min(balance, equity)
 input double InpDailyLossPct       = 2.0;     // Personal daily loss limit, % (base below; Ash Turbo firm: 3% of initial)
 input bool   InpDailyOnInitial     = true;    // Daily limit = % of INITIAL balance (Ash Turbo rule); false = of day-start ref
 input double InpMaxOpenRiskPct     = 0.5;     // Open + pending + new risk cap, % of equity
 input double InpMaxTotalDDPct      = 4.0;     // Personal total drawdown, % of initial balance (Ash firm: 6%)
 input bool   InpTrailingDD         = true;    // Floor follows the equity peak, locks at initial (Ash rule)
 input double InpInitialBalance     = 0.0;     // Initial balance for total DD (0 = balance at first start)
-input int    InpMaxTradesPerDay    = 3;       // Max entries per UTC day (00:00 UTC reset, 0 = off)
-input int    InpMaxPositions       = 1;       // Max open positions of this EA (0 = off)
-input int    InpMaxPending         = 1;       // Max pending orders of this EA (0 = off)
+input int    InpMaxTradesPerDay    = 3;       // Max entries per UTC day PER STRATEGY (00:00 UTC reset, 0 = off)
+input int    InpMaxPositions       = 1;       // Max open positions PER STRATEGY (its magic, 0 = off)
+input int    InpMaxPending         = 1;       // Max pending orders PER STRATEGY (its magic, 0 = off)
 input double InpCommissionPerLotRT = 0.0;     // Commission per lot, round turn (account currency)
 input double InpSlippageTicks      = 10.0;    // Slippage allowance on the stop (ticks)
 input double InpMaxLots            = 50.0;    // Hard lot cap (Upcomers: 50 lots)
@@ -130,6 +159,7 @@ CTrade        g_trade;
 CRBJournal    g_log;
 CRBMeta       g_meta;
 RBConfig      g_cfg;
+RBDtbsConfig  g_dcfg;
 RBRiskLimits  g_lim;
 RBRegimeCfg   g_reg;
 RBScaleCfg    g_scale;
@@ -150,6 +180,20 @@ const ENUM_TIMEFRAMES TF    = PERIOD_M15;
 
 //+------------------------------------------------------------------+
 string DirText(int dir) { return dir == RB_DIR_BULL ? "BUY" : "SELL"; }
+
+//--- both strategies' orders and positions belong to this EA (also while a strategy is disabled:
+//--- its open trades are still reconciled, booked and protected)
+bool IsOwnMagic(long m) { return m == InpMagic || m == InpMagicDTBS; }
+
+//--- strategy of a metadata record; records written before the "sid" field existed are RBOTE
+int MetaSid(ulong t) { return (int)g_meta.Get(t, "sid") == RB_SID_DTBS ? RB_SID_DTBS : RB_SID_RBOTE; }
+
+string MetaSignalId(ulong t)
+  {
+   int dir = (int)g_meta.Get(t, "dir");
+   datetime st = (datetime)g_meta.Get(t, "rbt");
+   return MetaSid(t) == RB_SID_DTBS ? RB_DtbsSignalId(dir, st) : RB_SignalId(dir, st);
+  }
 
 //--- n-th Sunday (n >= 1) of a month, 00:00
 datetime NthSunday(int year, int mon, int n)
@@ -225,6 +269,23 @@ void BuildConfig(void)
    g_cfg.require_sl_beyond_rb = InpRequireSlBeyondRb;
    g_cfg.rr                   = InpRR;
    g_cfg.min_stop_spread_mult = InpMinStopSpreadMult;
+
+   g_dcfg.Defaults();
+   g_dcfg.swing_n         = InpDtbsSwingN;
+   g_dcfg.htf_swing_n     = InpDtbsHtfSwingN;
+   g_dcfg.atr_period      = InpDtbsAtrPeriod;
+   g_dcfg.min_leg_atr     = InpDtbsMinLegATR;
+   g_dcfg.ext_bars        = InpDtbsExtBars;
+   g_dcfg.max_leg_bars    = InpDtbsMaxLegBars;
+   g_dcfg.break_dirs      = InpDtbsBreakDirs;
+   g_dcfg.confirm         = InpDtbsConfirm;
+   g_dcfg.sl_mode         = InpDtbsSlMode;
+   g_dcfg.sl_buffer_price = InpDtbsSlBuffer;
+   g_dcfg.sl_atr_mult     = InpDtbsSlAtrMult;
+   g_dcfg.rr              = InpDtbsRR;
+   g_dcfg.min_stop_atr    = InpDtbsMinStopATR;
+   g_dcfg.max_stop_atr    = InpDtbsMaxStopATR;
+   g_dcfg.htf_agreement   = InpDtbsHtfAgree;
 
    g_reg.Defaults();
    g_reg.enabled         = InpRegimeEnabled;
@@ -318,7 +379,7 @@ int OwnPendingCount(void)
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
-      if(t != 0 && OrderGetInteger(ORDER_MAGIC) == InpMagic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+      if(t != 0 && IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) && OrderGetString(ORDER_SYMBOL) == _Symbol)
          n++;
      }
    return n;
@@ -466,7 +527,7 @@ void UpdateExcursions(double bid, double ask)
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
-      if(t == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagic || PositionGetString(POSITION_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(PositionGetInteger(POSITION_MAGIC)) || PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
       ulong id = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
       int dir = (int)g_meta.Get(id, "dir");
@@ -589,7 +650,7 @@ int OnInit(void)
       g_log.Log("WARN", "", "symbol " + _Symbol, "strategy was specified for XAUUSD");
 
    //--- 1. parameters that must be chosen explicitly
-   if(InpStopMode == RB_STOP_FIXED && InpStopUnit == RB_UNIT_NOT_SET)
+   if(InpEnableRBOTE && InpStopMode == RB_STOP_FIXED && InpStopUnit == RB_UNIT_NOT_SET)
      {
       g_log.Log("INIT_REFUSED", "", "InpStopUnit not set",
                 "choose PRICE / POINTS / TICKS for the 10-point stop; it is never assumed");
@@ -606,6 +667,30 @@ int OnInit(void)
       g_log.Log("INIT_REFUSED", "", "invalid inputs", "check fib/rr/risk/lookback");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpMagicDTBS == InpMagic || InpMagicDTBS <= 0)
+     {
+      g_log.Log("INIT_REFUSED", "", "InpMagicDTBS=" + IntegerToString(InpMagicDTBS), "must be > 0 and differ from InpMagic");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpEnableDTBS &&
+      (!(InpDtbsRiskPct > 0.0) || InpDtbsRiskPct > 2.0 || InpMaxRiskPct < InpDtbsRiskPct || !(InpDtbsRR > 0.0) ||
+       InpDtbsExtBars < 1 || InpDtbsSwingN < 1 || InpDtbsHtfSwingN < 1 || InpDtbsAtrPeriod < 1 ||
+       InpDtbsMaxLegBars < 2 * InpDtbsSwingN + 1 || InpDtbsSlBuffer < 0.0 || InpDtbsMinStopATR < 0.0 ||
+       InpDtbsMaxStopATR < 0.0 || (InpDtbsMaxStopATR > 0.0 && InpDtbsMaxStopATR < InpDtbsMinStopATR) ||
+       InpDtbsHtfBars < 4 * InpDtbsHtfSwingN + 20 || InpLookbackBars < InpDtbsMaxLegBars + InpDtbsExtBars + 50))
+     {
+      g_log.Log("INIT_REFUSED", "", "invalid DTBS inputs", "check risk/rr/ext bars/swing/stop ATR bounds/HTF bars/lookback");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(!InpEnableRBOTE && !InpEnableDTBS)
+      g_log.Log("WARN", "", "both strategies disabled", "no new orders; existing trades are still managed");
+   g_log.Log("STRATEGIES", "", StringFormat("RBOTE=%s magic=%I64d risk=%.2f%% | DTBS=%s magic=%I64d risk=%.2f%%",
+             InpEnableRBOTE ? "on" : "off", InpMagic, InpRiskPct, InpEnableDTBS ? "on" : "off", InpMagicDTBS, InpDtbsRiskPct),
+             StringFormat("DTBS ext=%d dirs=%s confirm=%s sl=%s buf=%.2f stopATR[%.2f..%.2f] rr=%.2f htf=H1+H4 %s",
+                          InpDtbsExtBars, InpDtbsBreakDirs == RB_DTBS_BOTH ? "BOTH" : "WITH_TREND_ONLY",
+                          InpDtbsConfirm == RB_DTBS_CONFIRM_CLOSE ? "CLOSE" : "WICK", RB_DtbsSlModeText(InpDtbsSlMode),
+                          InpDtbsSlBuffer, InpDtbsMinStopATR, InpDtbsMaxStopATR, InpDtbsRR,
+                          InpDtbsHtfAgree == RB_DTBS_HTF_ALL ? "ALL" : "MAJORITY"));
 
    //--- 2. account gate. Every non-tester account (demo / prop evaluation included) needs
    //--- InpLiveConfirmLogin = its login. An account that is not known yet (terminal still
@@ -740,7 +825,7 @@ void OnDeinit(const int reason)
       for(int i = OrdersTotal() - 1; i >= 0; i--)
         {
          ulong t = OrderGetTicket(i);
-         if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+         if(t == 0 || !IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) || OrderGetString(ORDER_SYMBOL) != _Symbol)
             continue;
          if(OrderGetInteger(ORDER_TYPE_TIME) == ORDER_TIME_SPECIFIED)
             continue;
@@ -771,7 +856,7 @@ void Reconcile(const string when)
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
-      if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) || OrderGetString(ORDER_SYMBOL) != _Symbol)
          continue;
       if(RB_ReconcileOrder(g_meta.Has(t)) == RB_REC_CANCEL)
         {
@@ -784,10 +869,11 @@ void Reconcile(const string when)
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
-      if(t == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagic || PositionGetString(POSITION_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(PositionGetInteger(POSITION_MAGIC)) || PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
       ulong id   = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
       string cmt = PositionGetString(POSITION_COMMENT);
+      g_trade.SetExpertMagicNumber((ulong)PositionGetInteger(POSITION_MAGIC));   // close/modify under the position's own magic
       double sl  = PositionGetDouble(POSITION_SL);
       bool   buy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
       double msl = g_meta.Get(id, "sl");
@@ -819,6 +905,7 @@ void Reconcile(const string when)
                    ok ? "unprotected position without metadata closed" : "close failed: " + IntegerToString((long)g_trade.ResultRetcode()));
         }
      }
+   g_trade.SetExpertMagicNumber((ulong)InpMagic);
   }
 
 //+------------------------------------------------------------------+
@@ -855,7 +942,7 @@ void CancelAllPending(const string reason)
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
-      if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) || OrderGetString(ORDER_SYMBOL) != _Symbol)
          continue;
       CancelOrder(t, reason);
      }
@@ -867,7 +954,7 @@ void ManagePendingOnTick(double bid, double ask)
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
-      if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) || OrderGetString(ORDER_SYMBOL) != _Symbol)
          continue;
       int dir = (int)g_meta.Get(t, "dir");
       if(dir == 0)
@@ -883,13 +970,31 @@ void ManagePendingOnBar(const MqlRates &rates[], int n)
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
-      if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+      if(t == 0 || !IsOwnMagic(OrderGetInteger(ORDER_MAGIC)) || OrderGetString(ORDER_SYMBOL) != _Symbol)
          continue;
       int dir = (int)g_meta.Get(t, "dir");
       if(dir == 0)
          continue;
       datetime sig_bar = (datetime)g_meta.Get(t, "bar");
       double tp  = OrderGetDouble(ORDER_TP);
+      if(MetaSid(t) == RB_SID_DTBS)
+        {
+         //--- DTBS has no RB/zone structure: only target-before-fill and expiry (no pending orders by default)
+         int alive_d = 0, code_d = RB_CANCEL_NONE;
+         for(int k = 0; k < n && code_d == RB_CANCEL_NONE; k++)
+           {
+            if(rates[k].time <= sig_bar)
+               continue;
+            alive_d++;
+            if((dir == RB_DIR_BULL && rates[k].high >= tp) || (dir == RB_DIR_BEAR && rates[k].low <= tp))
+               code_d = RB_CANCEL_TP_REACHED;
+            else if(InpOrderExpiryBars > 0 && alive_d >= InpOrderExpiryBars)
+               code_d = RB_CANCEL_EXPIRED;
+           }
+         if(code_d != RB_CANCEL_NONE)
+            CancelOrder(t, RB_CancelText(code_d));
+         continue;
+        }
       double rbl = g_meta.Get(t, "rbl"), rbh = g_meta.Get(t, "rbh");
       double zt  = g_meta.Get(t, "zt"),  zb  = g_meta.Get(t, "zb");
       int alive = 0;
@@ -1130,6 +1235,14 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
       return;
      }
 
+   //--- no hedging (Upcomers): refuse when the symbol carries opposite exposure (any magic)
+   string opp;
+   if(RB_OppositeExposure(_Symbol, plan.dir, opp))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx + " " + opp, "OPPOSITE_EXPOSURE");
+      return;
+     }
+
    //--- account gate again right before sending (login / connection / mode may have changed)
    int perm = TradingPermission();
    if(perm != 0)
@@ -1139,6 +1252,7 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
      }
 
    //--- send: prices on the symbol grid; RETURN filling for pending limits where allowed
+   g_trade.SetExpertMagicNumber((ulong)InpMagic);
    double entry = NormalizeDouble(plan.entry, _Digits);
    double sl    = NormalizeDouble(plan.sl, _Digits);
    double tp    = NormalizeDouble(plan.tp, _Digits);
@@ -1156,6 +1270,7 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
       return;
      }
    g_meta.Set(ticket, "dir", plan.dir);
+   g_meta.Set(ticket, "sid", RB_SID_RBOTE);
    g_meta.Set(ticket, "entry", entry);
    g_meta.Set(ticket, "sl", sl);
    g_meta.Set(ticket, "tp", tp);
@@ -1190,6 +1305,339 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    g_log.Log("ORDER_SENT", id, pctx + gctx + " ticket=" + IntegerToString((long)ticket) +
              (tt == ORDER_TIME_SPECIFIED ? " expires=" + TimeToString(exp) :
               tt == ORDER_TIME_DAY ? " DAY (EA-side expiry)" : " GTC (EA-side expiry, cancelled on EA removal)"), "OK");
+  }
+
+//+------------------------------------------------------------------+
+//| DTBS: signal -> checks -> MARKET order (spec 02 sections 3-5)    |
+//| Same pipeline as RBOTE: duplicate claim, regime, challenge, day  |
+//| block, time/news filters, spread, plan (live bid/ask), market    |
+//| checks, lots at InpDtbsRiskPct, margin, account-wide guard,      |
+//| no-hedging check, account gate, send under InpMagicDTBS.         |
+//| Regime: same allow/skip and risk multiplier as RBOTE; the RR     |
+//| overrides (InpRR*Vol / InpRRRange) are RBOTE-scale R values and  |
+//| are NOT applied: DTBS keeps InpDtbsRR (spec: 1.5).               |
+//| Profit scaling uses the same formula with base InpDtbsRiskPct;   |
+//| edge weighting (RBOTE setup features) is not applied (x1.00).    |
+//+------------------------------------------------------------------+
+void ProcessDtbsSignal(const RBDtbsSignal &sig, const CRBSeries &series)
+  {
+   string id = RB_DtbsSignalId(sig.dir, sig.break_time);
+   string ctx = StringFormat("%s %s break trend=%s A[%s @%s] B[%s @%s] C[%s @%s] line=%s close=%s %s",
+                             DirText(sig.dir), sig.with_trend ? "WITH_TREND" : "COUNTER", RB_DtbsTrendText(sig.main_trend),
+                             DoubleToString(sig.a_price, _Digits), TimeToString(series.Time(sig.a_idx)),
+                             DoubleToString(sig.b_price, _Digits), TimeToString(series.Time(sig.b_idx)),
+                             DoubleToString(sig.c_price, _Digits),
+                             TimeToString(series.Time(sig.b_idx) + (datetime)(PeriodSeconds(TF) * InpDtbsExtBars)),
+                             DoubleToString(sig.line_at_break, _Digits), DoubleToString(series.C(sig.break_idx), _Digits),
+                             sig.close_confirmed ? "CLOSE_CONFIRMED" : "WICK_ONLY");
+
+   //--- duplicate guard (global variable + broker comments) and atomic claim
+   if(g_meta.Processed(id) || RB_SignalExistsAtBroker(_Symbol, InpMagicDTBS, id, 7))
+     {
+      g_log.Log("SIGNAL_DUPLICATE", id, ctx, "already processed");
+      return;
+     }
+   if(!g_meta.Claim(id))
+     {
+      g_log.Log("SIGNAL_DUPLICATE", id, ctx, "claimed by another EA instance (or claim failed, err=" +
+                IntegerToString(GetLastError()) + ")");
+      return;
+     }
+   g_meta.MarkProcessed(id);
+   //--- regime at the break (closed) bar
+   RBRegime reg;
+   RB_ClassifyRegime(series, sig.break_idx, g_reg, reg);
+   RBRegimeDecision rd;
+   RB_RegimeDecide(reg, g_reg, InpDtbsRR, rd);
+   ctx += StringFormat(" regime=%s VR=%.2f ER=%.2f", rd.reason, reg.vol_ratio, reg.er);
+   g_log.Log("SIGNAL", id, ctx, "DTBS break confirmed");
+   if(!rd.allow)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "REGIME_SKIP " + rd.reason);
+      return;
+     }
+   RBDtbsConfig dcfg = g_dcfg;   // RR stays InpDtbsRR (regime RR overrides are RBOTE-scale, see header)
+
+   string why = "";
+   int ch = CheckChallenge();
+   if(ch != RB_CH_CONTINUE)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, RB_ChallengeText(ch));
+      return;
+     }
+   if(g_day_blocked)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "DAILY_BLOCK");
+      return;
+     }
+   if(TimeBlocked(why))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, why);
+      return;
+     }
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.bid <= 0.0 || tick.ask <= 0.0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "NO_QUOTE");
+      return;
+     }
+   double spread = tick.ask - tick.bid;
+   if(InpMaxSpreadPrice > 0.0 && spread > InpMaxSpreadPrice)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "SPREAD " + DoubleToString(spread, _Digits));
+      return;
+     }
+   if(!RB_ReadSymbolSpec(_Symbol, g_spec))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "BAD_SYMBOL_SPEC " + RB_SpecText(g_spec));
+      return;
+     }
+
+   //--- plan from the live price: buy at ask, sell at bid
+   double live = sig.dir == RB_DIR_BULL ? tick.ask : tick.bid;
+   RBPlan plan;
+   int used_mode = -1;
+   int r = RB_DtbsBuildPlanEx(sig, dcfg, g_spec, live, spread, plan, used_mode);
+   if(r != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx + StringFormat(" live=%s spread=%s atr=%s start=%s", DoubleToString(live, _Digits),
+                DoubleToString(spread, _Digits), DoubleToString(sig.atr, _Digits),
+                sig.start_valid ? DoubleToString(sig.start_price, _Digits) : "n/a"), RB_DtbsReasonText(r));
+      return;
+     }
+   string pctx = StringFormat("entry=%s (market) sl=%s tp=%s risk_dist=%s (%s points) rr=%.2f sl_mode=%s",
+                              DoubleToString(plan.entry, _Digits), DoubleToString(plan.sl, _Digits),
+                              DoubleToString(plan.tp, _Digits), DoubleToString(plan.risk_dist, _Digits),
+                              DoubleToString(plan.risk_dist / g_spec.point, 1), dcfg.rr, RB_DtbsSlModeText(used_mode));
+   //--- broker minimum (stops + freeze level) and stop >= InpMinStopSpreadMult x spread
+   r = RB_DtbsCheckMarket(plan, g_spec, tick.bid, tick.ask, InpMinStopSpreadMult);
+   if(r != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + StringFormat(" bid=%s ask=%s", DoubleToString(tick.bid, _Digits),
+                DoubleToString(tick.ask, _Digits)), RB_DtbsReasonText(r));
+      return;
+     }
+
+   //--- lot size: same formula as RBOTE, base risk InpDtbsRiskPct
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE), eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   double ref_eq = MathMin(bal, eq);
+   RBScaleCfg sc = g_scale;
+   sc.base_pct = InpDtbsRiskPct / 100.0;
+   string scale_why;
+   double pct = RB_ProfitScaledPct(sc, g_lim.initial_balance, bal, GvGet("hwm", bal), ref_eq,
+                                   (int)GvGet("consec_losses", 0.0), scale_why);
+   double edge_mult = 1.0;
+   double risk_money = RB_FinalRiskMoney(pct, ref_eq, rd.risk_mult, edge_mult, sc.max_pct);
+   double stop_atr = sig.atr > 0.0 ? plan.risk_dist / sig.atr : 0.0;
+   MqlDateTime sdt;
+   TimeToStruct(ServerToUtc(sig.break_time + PeriodSeconds(TF)), sdt);
+   RBFeatures feat;
+   RB_MakeFeatures(sig.dir, -1, reg.valid ? reg.vol_class : RB_VOL_NORMAL, reg.ranging, sdt.hour, feat);
+   string card = StringFormat("WHY: DTBS %s break (%s) main trend=%s (H1+H4 %s) A=%s B=%s C=%s (B+%d bars) line=%s "
+                              "leg=%.2f ATR stop=%s %.2f ATR (start=%s candle=[%s..%s]) | regime=%s VR=%.2f ER=%.2f -> x%.2f rr=%.2f | "
+                              "base=%.3f%% profit-scale=%s -> %.3f%% | edge=N/A x1.000 | final risk=%.2f (%.3f%% of %.2f)",
+                              DirText(sig.dir), sig.with_trend ? "with trend" : "counter", RB_DtbsTrendText(sig.main_trend),
+                              InpDtbsHtfAgree == RB_DTBS_HTF_ALL ? "ALL" : "MAJORITY",
+                              DoubleToString(sig.a_price, _Digits), DoubleToString(sig.b_price, _Digits),
+                              DoubleToString(sig.c_price, _Digits), InpDtbsExtBars, DoubleToString(sig.line_at_break, _Digits),
+                              sig.atr > 0.0 ? MathAbs(sig.b_price - sig.a_price) / sig.atr : 0.0,
+                              RB_DtbsSlModeText(used_mode), stop_atr,
+                              sig.start_valid ? DoubleToString(sig.start_price, _Digits) : "n/a",
+                              DoubleToString(sig.break_low, _Digits), DoubleToString(sig.break_high, _Digits),
+                              rd.reason, reg.vol_ratio, reg.er, rd.risk_mult, dcfg.rr,
+                              sc.base_pct * 100.0, scale_why, pct * 100.0, risk_money,
+                              ref_eq > 0.0 ? risk_money / ref_eq * 100.0 : 0.0, ref_eq);
+   g_log.Log("DECISION", id, card, "risk inputs");
+   ENUM_ORDER_TYPE mtype = plan.dir == RB_DIR_BULL ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double tick_loss = RB_LossPerLot(plan.risk_dist, g_spec, InpCommissionPerLotRT, InpSlippageTicks);
+   double calc_loss = RB_LossBetween(_Symbol, mtype, 1.0, plan.entry, plan.sl);
+   double loss_per_lot = tick_loss;
+   if(calc_loss > 0.0)
+      loss_per_lot = MathMax(tick_loss, calc_loss + InpCommissionPerLotRT + InpSlippageTicks * g_spec.tick_value_loss);
+   double lots = 0.0;
+   r = RB_CalcLots(risk_money, loss_per_lot, g_spec, InpMaxLots, lots);
+   if(r != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + StringFormat(" risk_money=%.2f loss_per_lot=%.2f", risk_money, loss_per_lot),
+                RB_ReasonText(r));
+      return;
+     }
+   lots = NormalizeDouble(lots, 8);
+   double trade_risk = lots * loss_per_lot;
+
+   double margin = 0.0;
+   if(!OrderCalcMargin(mtype, _Symbol, lots, plan.entry, margin) || margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * 0.9)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + StringFormat(" lots=%.2f margin=%.2f", lots, margin), "INSUFFICIENT_MARGIN");
+      return;
+     }
+
+   //--- account-wide guard (daily / open risk / total DD shared); positions, pending and trades
+   //--- per day are counted for the DTBS magic
+   RBRiskSnapshot snap;
+   string err;
+   if(!RB_BuildSnapshot(InpMagicDTBS, InpCommissionPerLotRT, InpSlippageTicks, g_day_ref, ServerOffsetSec(), snap, err))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx, "SNAPSHOT_FAILED " + err);
+      return;
+     }
+   int g = RB_CheckNewOrder(g_lim, snap, trade_risk);
+   string gctx = StringFormat(" lots=%.2f risk=%.2f realized=%.2f open=%.2f open_now=%.2f pending=%.2f day_ref=%.2f daily_limit=%.2f",
+                              lots, trade_risk, snap.realized_today, snap.open_risk, snap.open_risk_now, snap.pending_risk,
+                              snap.day_start_ref, RB_DailyLimitMoney(g_lim, snap));
+   if(g != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx, RB_GuardText(g));
+      return;
+     }
+   string opp;
+   if(RB_OppositeExposure(_Symbol, plan.dir, opp))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx + " " + opp, "OPPOSITE_EXPOSURE");
+      return;
+     }
+   int perm = TradingPermission();
+   if(perm != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx, "PERMISSION " + RB_PermissionText(perm));
+      return;
+     }
+
+   //--- send: market order under the DTBS magic, SL/TP from the plan
+   double sl = NormalizeDouble(plan.sl, _Digits);
+   double tp = NormalizeDouble(plan.tp, _Digits);
+   g_trade.SetExpertMagicNumber((ulong)InpMagicDTBS);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+   bool sent = (plan.dir == RB_DIR_BULL) ? g_trade.Buy(lots, _Symbol, 0.0, sl, tp, id)
+                                         : g_trade.Sell(lots, _Symbol, 0.0, sl, tp, id);
+   g_trade.SetExpertMagicNumber((ulong)InpMagic);
+   uint rc = g_trade.ResultRetcode();
+   ulong ticket = g_trade.ResultOrder();
+   if(!sent || (rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_DONE_PARTIAL && rc != TRADE_RETCODE_PLACED) || ticket == 0)
+     {
+      g_log.Log("ORDER_REJECTED", id, pctx + gctx, "retcode=" + IntegerToString((long)rc) + " " + g_trade.ResultRetcodeDescription());
+      return;
+     }
+   double entry = NormalizeDouble(plan.entry, _Digits);
+   g_meta.Set(ticket, "dir", plan.dir);
+   g_meta.Set(ticket, "sid", RB_SID_DTBS);
+   g_meta.Set(ticket, "entry", entry);
+   g_meta.Set(ticket, "sl", sl);
+   g_meta.Set(ticket, "tp", tp);
+   g_meta.Set(ticket, "bar", (double)sig.break_time);
+   g_meta.Set(ticket, "rbt", (double)sig.break_time);
+   g_meta.Set(ticket, "risk", trade_risk);
+   g_meta.Set(ticket, "atr", sig.atr);
+   g_meta.Set(ticket, "zty", -1.0);
+   g_meta.Set(ticket, "vr", reg.vol_ratio);
+   g_meta.Set(ticket, "er", reg.er);
+   g_meta.Set(ticket, "vc", reg.valid ? reg.vol_class : -1);
+   g_meta.Set(ticket, "rng", reg.ranging ? 1.0 : 0.0);
+   g_meta.Set(ticket, "rr", dcfg.rr);
+   g_meta.Set(ticket, "rmul", rd.risk_mult);
+   g_meta.Set(ticket, "pct", pct);
+   g_meta.Set(ticket, "emul", edge_mult);
+   g_meta.Set(ticket, "srs", ScaleReasonCode(scale_why));
+   g_meta.Set(ticket, "zh", 0.0);
+   g_meta.Set(ticket, "wr", 0.0);
+   g_meta.Set(ticket, "rba", 0.0);
+   g_meta.Set(ticket, "sta", stop_atr);
+   g_meta.Set(ticket, "wt", sig.with_trend ? 1.0 : 0.0);
+   g_meta.Set(ticket, "slm", used_mode);
+   g_meta.Set(ticket, "mfe", 0.0);
+   g_meta.Set(ticket, "mae", 0.0);
+   for(int d = 0; d < RB_FEAT_DIMS; d++)
+      g_meta.Set(ticket, "f" + IntegerToString(d), feat.b[d]);
+   g_meta.Flush();
+   g_log.Log("ORDER_SENT", id, pctx + gctx + " ticket=" + IntegerToString((long)ticket) +
+             StringFormat(" market %s filled=%s", DirText(plan.dir), DoubleToString(g_trade.ResultPrice(), _Digits)), "OK");
+  }
+
+//+------------------------------------------------------------------+
+//| DTBS evaluation on the closed-M15 window `rates` (fresh data).   |
+//| Main trend per M15 bar = H1 and H4 trend of the last HTF bar     |
+//| CLOSED at that M15 bar's close (RB_DtbsAlignTrend), combined     |
+//| with InpDtbsHtfAgree. Acts only on a break of the last bar.      |
+//+------------------------------------------------------------------+
+//--- HTF freshness: the forming HTF bar must contain the close of the last closed M15 bar, so
+//--- every HTF bar that closed by then is in the copied (closed-only) history. Unlike a fixed lag
+//--- this also holds right after the weekend gap.
+bool CopyHtfSeries(ENUM_TIMEFRAMES tf, datetime ltf_close, CRBSeries &out, bool connected, string &why)
+  {
+   out.Clear();
+   int per = PeriodSeconds(tf);
+   datetime cur = iTime(_Symbol, tf, 0);
+   if(!connected || cur <= 0 || cur > ltf_close || ltf_close >= cur + per)
+     {
+      why = StringFormat("%s stale: forming bar %s, last M15 close %s", EnumToString(tf), TimeToString(cur),
+                         TimeToString(ltf_close));
+      return false;
+     }
+   MqlRates hr[];
+   ArraySetAsSeries(hr, false);
+   int hn = CopyRates(_Symbol, tf, 1, InpDtbsHtfBars, hr);   // start=1: closed HTF bars only
+   if(hn < 4 * InpDtbsHtfSwingN + 20)
+     {
+      why = StringFormat("%s bars=%d err=%d", EnumToString(tf), hn, GetLastError());
+      return false;
+     }
+   if(hr[hn - 1].time >= cur)
+     {
+      why = StringFormat("%s copy not closed-only: last %s forming %s", EnumToString(tf), TimeToString(hr[hn - 1].time),
+                         TimeToString(cur));
+      return false;
+     }
+   RBBar b;
+   for(int i = 0; i < hn; i++)
+     {
+      b.time  = hr[i].time;
+      b.open  = hr[i].open;
+      b.high  = hr[i].high;
+      b.low   = hr[i].low;
+      b.close = hr[i].close;
+      out.Add(b);
+     }
+   return true;
+  }
+
+void EvaluateDtbs(const MqlRates &rates[], int n, bool connected)
+  {
+   string why;
+   CRBSeries h1, h4;
+   datetime ltf_close = rates[n - 1].time + PeriodSeconds(TF);
+   if(!CopyHtfSeries(PERIOD_H1, ltf_close, h1, connected, why) || !CopyHtfSeries(PERIOD_H4, ltf_close, h4, connected, why))
+     {
+      g_log.Log("DATA_INSUFFICIENT", "", "DTBS " + why, "no DTBS evaluation this bar", "DTBS");
+      return;
+     }
+   CRBSeries s;
+   RBBar b;
+   for(int i = 0; i < n; i++)
+     {
+      b.time  = rates[i].time;
+      b.open  = rates[i].open;
+      b.high  = rates[i].high;
+      b.low   = rates[i].low;
+      b.close = rates[i].close;
+      s.Add(b);
+     }
+   CRBVec<int> t1, t4, a1, a4, mt;
+   RB_DtbsTrendSeries(h1, g_dcfg.htf_swing_n, t1);
+   RB_DtbsTrendSeries(h4, g_dcfg.htf_swing_n, t4);
+   RB_DtbsAlignTrend(s, PeriodSeconds(TF), h1, PeriodSeconds(PERIOD_H1), t1, a1);
+   RB_DtbsAlignTrend(s, PeriodSeconds(TF), h4, PeriodSeconds(PERIOD_H4), t4, a4);
+   RB_DtbsCombineSeries(a1, a4, g_dcfg.htf_agreement, mt);
+   CRBVec<RBDtbsTriangle> tris;
+   CRBVec<RBDtbsSignal>   sigs;
+   RB_DtbsScanEx(s, mt, g_dcfg, tris, sigs);   // also computes ATR on s (regime uses it)
+
+   RBDtbsSignal sig;
+   for(int i = 0; i < sigs.Size(); i++)
+     {
+      sigs.Get(i, sig);
+      if(sig.break_idx == n - 1)
+         ProcessDtbsSignal(sig, s);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -1249,18 +1697,24 @@ void OnNewBar(void)
       b.close = rates[i].close;
       s.Add(b);
      }
-   CRBVec<RBZone>   zones;
-   CRBVec<RBSignal> sigs;
-   RB_Scan(s, g_cfg, zones, sigs);
-
-   //--- act only on a signal confirmed by the bar that just closed
-   RBSignal sig;
-   for(int i = 0; i < sigs.Size(); i++)
+   if(InpEnableRBOTE)
      {
-      sigs.Get(i, sig);
-      if(sig.confirm_idx == n - 1)
-         ProcessSignal(sig, s);
+      CRBVec<RBZone>   zones;
+      CRBVec<RBSignal> sigs;
+      RB_Scan(s, g_cfg, zones, sigs);
+
+      //--- act only on a signal confirmed by the bar that just closed
+      RBSignal sig;
+      for(int i = 0; i < sigs.Size(); i++)
+        {
+         sigs.Get(i, sig);
+         if(sig.confirm_idx == n - 1)
+            ProcessSignal(sig, s);
+        }
      }
+   //--- DTBS on the same closed-M15 window, same freshness rule (break bar = bar that just closed)
+   if(InpEnableDTBS)
+      EvaluateDtbs(rates, n, connected);
   }
 
 void OnTick(void)
@@ -1366,7 +1820,8 @@ bool ProcessClosedPosition(ulong pos, bool order_gone = false)
    double fill = in_px / in_vol;      // volume-weighted entry
    double px   = out_px / out_vol;    // volume-weighted exit
 
-   string id   = RB_SignalId((int)g_meta.Get(pos, "dir"), (datetime)g_meta.Get(pos, "rbt"));
+   int sid     = MetaSid(pos);
+   string id   = MetaSignalId(pos);
    double risk = g_meta.Get(pos, "risk");
    double rr   = risk > 0.0 ? net / risk : 0.0;
    int dir     = (int)g_meta.Get(pos, "dir");
@@ -1389,7 +1844,7 @@ bool ProcessClosedPosition(ulong pos, bool order_gone = false)
    row.atr             = g_meta.Get(pos, "atr");
    row.zone_type       = (int)g_meta.Get(pos, "zty");
    row.rr              = g_meta.Get(pos, "rr");
-   row.stop_mode       = InpStopMode;
+   row.stop_mode       = sid == RB_SID_DTBS ? -1 : (int)InpStopMode;   // RBOTE column; DTBS sl mode is in the journal
    row.exit_price      = px;
    row.vol_class       = (int)g_meta.Get(pos, "vc");
    row.ranging         = g_meta.Get(pos, "rng") > 0.5;
@@ -1407,6 +1862,14 @@ bool ProcessClosedPosition(ulong pos, bool order_gone = false)
    row.risk_pct        = g_meta.Get(pos, "pct");
    row.edge_mult       = g_meta.Get(pos, "emul");
    row.scale_reason    = ScaleReasonText((int)g_meta.Get(pos, "srs"));
+   row.strategy        = RB_StrategyText(sid);
+   if(sid == RB_SID_DTBS)
+     {
+      row.zone_type = -1;   // RBOTE-only columns: no PD array / rejection block
+      row.zones_hit = 0;
+      row.wick_ratio = 0.0;
+      row.rb_range_atr = 0.0;
+     }
 
    //--- outcome explanation: what happened and under which conditions
    RBFeatures feat;
@@ -1417,18 +1880,32 @@ bool ProcessClosedPosition(ulong pos, bool order_gone = false)
    for(int d = 0; d < RB_FEAT_DIMS; d++)
       cond += (d > 0 ? (string)" " : (string)"") + RB_DimText(d) + "=" + RB_BucketText(d, feat.b[d]);
    string outcome = rr > 0.0 ? "WIN" : "LOSS";
-   string story = StringFormat("%s %.2fR by %s | went +%.2fR / %.2fR before exit | %s | zone hits=%d wick=%.0f%% "
-                               "RB=%.2f ATR stop=%.2f ATR | filled after %d bars | risk %.3f%% (%s, edge x%.2f, regime x%.2f)",
-                               outcome, rr, row.exit_reason, row.mfe_r, row.mae_r, cond, row.zones_hit,
-                               row.wick_ratio * 100.0, row.rb_range_atr, row.stop_atr, row.fill_delay_bars,
-                               row.risk_pct * 100.0, row.scale_reason, row.edge_mult, row.risk_mult);
+   string story;
+   if(sid == RB_SID_DTBS)
+      story = StringFormat("%s %.2fR by %s | went +%.2fR / %.2fR before exit | DTBS %s break sl_mode=%s stop=%.2f ATR | "
+                           "regime=%s%s | risk %.3f%% (%s, regime x%.2f)",
+                           outcome, rr, row.exit_reason, row.mfe_r, row.mae_r,
+                           g_meta.Get(pos, "wt") > 0.5 ? "with-trend" : "counter",
+                           RB_DtbsSlModeText((int)g_meta.Get(pos, "slm")), row.stop_atr,
+                           row.vol_class < 0 ? "UNKNOWN" : RB_VolText(row.vol_class), row.ranging ? "+RANGE" : "",
+                           row.risk_pct * 100.0, row.scale_reason, row.risk_mult);
+   else
+      story = StringFormat("%s %.2fR by %s | went +%.2fR / %.2fR before exit | %s | zone hits=%d wick=%.0f%% "
+                           "RB=%.2f ATR stop=%.2f ATR | filled after %d bars | risk %.3f%% (%s, edge x%.2f, regime x%.2f)",
+                           outcome, rr, row.exit_reason, row.mfe_r, row.mae_r, cond, row.zones_hit,
+                           row.wick_ratio * 100.0, row.rb_range_atr, row.stop_atr, row.fill_delay_bars,
+                           row.risk_pct * 100.0, row.scale_reason, row.edge_mult, row.risk_mult);
    g_log.Log("CLOSED", id, StringFormat("position %I64u exit=%s (vol-weighted) net=%.2f risk=%.2f", pos,
              DoubleToString(px, _Digits), net, risk), story);
    g_log.Trade(row);
 
-   //--- learn from the closed trade (past trades only -> no lookahead)
-   g_stats.Add(feat, rr);
-   SaveEdgeStats();
+   //--- learn from the closed trade (past trades only -> no lookahead). The edge buckets describe
+   //--- RBOTE setups (zone type ...), so only RBOTE trades feed them; the loss streak is account-wide.
+   if(sid != RB_SID_DTBS)
+     {
+      g_stats.Add(feat, rr);
+      SaveEdgeStats();
+     }
    GvSet("consec_losses", net < 0.0 ? GvGet("consec_losses", 0.0) + 1.0 : 0.0);
    GvSet("last_close", (double)TimeCurrent());
    UpdateHighWaterMark();
@@ -1495,7 +1972,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
      {
       double px      = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
       double planned = g_meta.Get(pos, "entry");
-      string id      = RB_SignalId((int)g_meta.Get(pos, "dir"), (datetime)g_meta.Get(pos, "rbt"));
+      string id      = MetaSignalId(pos);
       g_log.Log("FILLED", id, StringFormat("position %I64u price=%s planned=%s slippage=%s vol=%.2f", pos,
                 DoubleToString(px, _Digits), DoubleToString(planned, _Digits),
                 DoubleToString(px - planned, _Digits), HistoryDealGetDouble(trans.deal, DEAL_VOLUME)), "OK");
@@ -1509,6 +1986,71 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //| Strategy Tester summary (net R statistics from broker deals)     |
 //+------------------------------------------------------------------+
+//--- per-strategy closed trades and net profit from the deal history: a position belongs to the
+//--- strategy whose magic opened it (closing deals by SL/TP/stop-out may carry another magic)
+void StrategyTotals(int &n_rb, double &net_rb, int &n_dt, double &net_dt, int &n_other, double &net_other)
+  {
+   n_rb = n_dt = n_other = 0;
+   net_rb = net_dt = net_other = 0.0;
+   if(!HistorySelect(0, TimeCurrent() + 86400))
+      return;
+   int total = HistoryDealsTotal();
+   long pid[], pmag[];
+   int np = 0;
+   ArrayResize(pid, 0, 1024);
+   ArrayResize(pmag, 0, 1024);
+   for(int i = 0; i < total; i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0 || HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN)
+         continue;
+      long type = HistoryDealGetInteger(d, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+      ArrayResize(pid, np + 1, 1024);
+      ArrayResize(pmag, np + 1, 1024);
+      pid[np]  = HistoryDealGetInteger(d, DEAL_POSITION_ID);
+      pmag[np] = HistoryDealGetInteger(d, DEAL_MAGIC);
+      np++;
+     }
+   for(int i = 0; i < total; i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0)
+         continue;
+      long type = HistoryDealGetInteger(d, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+      long e = HistoryDealGetInteger(d, DEAL_ENTRY);
+      long p = HistoryDealGetInteger(d, DEAL_POSITION_ID);
+      long m = HistoryDealGetInteger(d, DEAL_MAGIC);
+      for(int j = 0; j < np; j++)
+         if(pid[j] == p)
+           {
+            m = pmag[j];
+            break;
+           }
+      double v = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_COMMISSION) +
+                 HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_FEE);
+      bool out = (e == DEAL_ENTRY_OUT || e == DEAL_ENTRY_OUT_BY || e == DEAL_ENTRY_INOUT);
+      if(m == InpMagic)
+        {
+         net_rb += v;
+         if(out) n_rb++;
+        }
+      else if(m == InpMagicDTBS)
+        {
+         net_dt += v;
+         if(out) n_dt++;
+        }
+      else
+        {
+         net_other += v;
+         if(out) n_other++;
+        }
+     }
+  }
+
 double OnTester(void)
   {
    double trades = TesterStatistics(STAT_TRADES);
@@ -1517,6 +2059,13 @@ double OnTester(void)
    double net    = TesterStatistics(STAT_PROFIT);
    PrintFormat("[RBOTE] tester: trades=%.0f net=%.2f PF=%.2f maxEquityDD=%.2f%% rr=%.1f stop_mode=%s; trades file: Common\\Files\\%s",
                trades, net, pf, dd, InpRR, EnumToString(InpStopMode), g_log.TradesFile());
+   int n_rb, n_dt, n_ot;
+   double net_rb, net_dt, net_ot;
+   StrategyTotals(n_rb, net_rb, n_dt, net_dt, n_ot, net_ot);
+   PrintFormat("[RBOTE] tester per strategy: RBOTE(%s, magic %I64d) trades=%d net=%.2f | DTBS(%s, magic %I64d) trades=%d net=%.2f | "
+               "other trades=%d net=%.2f | total trades=%d net=%.2f (closing deals, incl. commission/swap)",
+               InpEnableRBOTE ? "on" : "off", InpMagic, n_rb, net_rb, InpEnableDTBS ? "on" : "off", InpMagicDTBS, n_dt, net_dt,
+               n_ot, net_ot, n_rb + n_dt + n_ot, net_rb + net_dt + net_ot);
    // custom criterion: net profit per trade, 0 when the sample is too small to mean anything
    if(trades < 30)
       return 0.0;

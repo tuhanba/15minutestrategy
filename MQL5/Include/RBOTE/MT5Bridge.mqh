@@ -183,6 +183,51 @@ bool RB_SignalExistsAtBroker(const string sym, long magic, const string signal_i
    return false;
   }
 
+//--- DTBS signal id (order comment, <= 31 chars): DTBS|B|<break bar open time> / DTBS|S|<...>
+string RB_DtbsSignalId(int dir, datetime break_time)
+  {
+   return (string)"DTBS|" + (dir == RB_DIR_BULL ? "B" : "S") + "|" + IntegerToString((long)break_time);
+  }
+
+//+------------------------------------------------------------------+
+//| No hedging (Upcomers rule): is there an open position or pending |
+//| order on `sym` (ANY magic, also manual) in the direction opposite|
+//| to `dir`? `what` names the first one found.                      |
+//+------------------------------------------------------------------+
+bool RB_OppositeExposure(const string sym, int dir, string &what)
+  {
+   what = "";
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetString(POSITION_SYMBOL) != sym)
+         continue;
+      bool buy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      if((dir == RB_DIR_BULL && !buy) || (dir == RB_DIR_BEAR && buy))
+        {
+         what = StringFormat("position %I64u %s magic=%I64d", t, buy ? "BUY" : "SELL", PositionGetInteger(POSITION_MAGIC));
+         return true;
+        }
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || OrderGetString(ORDER_SYMBOL) != sym)
+         continue;
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool buy  = (type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP ||
+                   type == ORDER_TYPE_BUY_STOP_LIMIT);
+      bool sell = (type == ORDER_TYPE_SELL || type == ORDER_TYPE_SELL_LIMIT || type == ORDER_TYPE_SELL_STOP ||
+                   type == ORDER_TYPE_SELL_STOP_LIMIT);
+      if((dir == RB_DIR_BULL && sell) || (dir == RB_DIR_BEAR && buy))
+        {
+         what = StringFormat("order %I64u %s magic=%I64d", t, EnumToString(type), OrderGetInteger(ORDER_MAGIC));
+         return true;
+        }
+     }
+   return false;
+  }
+
 //--- loss in account currency if a trade of `volume` goes from `from` to `to` (>= 0)
 double RB_LossBetween(const string sym, ENUM_ORDER_TYPE type, double volume, double from, double to)
   {

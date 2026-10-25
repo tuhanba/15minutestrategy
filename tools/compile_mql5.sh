@@ -23,6 +23,8 @@ done
 
 status=0
 cd "$MT5"
+# never test a stale binary: remove previous builds first
+rm -f "$MT5/MQL5/Experts/RBOTE/RBOTE_EA.ex5" "$MT5/MQL5/Scripts/RBOTE/RBOTE_Tests.ex5"
 for src in 'Experts\RBOTE\RBOTE_EA.mq5' 'Scripts\RBOTE\RBOTE_Tests.mq5'; do
   log="$MT5/compile_$(basename "${src//\\//}" .mq5).log"
   "$WINE" MetaEditor64.exe /portable /compile:"$MT5WIN\\MQL5\\$src" /include:"$MT5WIN\\MQL5" /log:"$MT5WIN\\$(basename "$log")" || true

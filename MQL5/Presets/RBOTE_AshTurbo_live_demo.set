@@ -10,6 +10,10 @@ InpAllowLiveTrading=false
 ; set InpLiveConfirmLogin to this account's login number, otherwise the EA refuses to start.
 InpLiveConfirmLogin=0
 InpMagic=7915790
+; RBOTE only (unchanged behaviour); both strategies: RBOTE_DTBS_AshTurbo_live_demo.set
+InpEnableRBOTE=true
+InpEnableDTBS=false
+InpMagicDTBS=7915791
 InpFibLevel=0.79
 InpRR=6
 InpStopMode=0

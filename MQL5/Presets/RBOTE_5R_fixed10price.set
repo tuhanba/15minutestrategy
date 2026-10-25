@@ -5,6 +5,12 @@ InpAllowLiveTrading=false
 ; InpLiveConfirmLogin is ignored in the tester; outside it EVERY account needs it = its login.
 InpLiveConfirmLogin=0
 InpMagic=7915790
+; Strategies (one EA, account-wide limits; spec docs/02 section 5). Research presets run both;
+; RBOTE-only research preset (DTBS off). Combined run: RBOTE_DTBS_combined_tester.set
+InpEnableRBOTE=true
+InpEnableDTBS=false
+InpMagicDTBS=7915791
+InpDtbsRiskPct=0.25
 InpFibLevel=0.79
 InpRR=5
 InpStopMode=0

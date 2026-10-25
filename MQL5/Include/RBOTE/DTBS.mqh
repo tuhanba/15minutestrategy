@@ -334,7 +334,8 @@ void RB_DtbsCombineSeries(const CRBVec<int> &a, const CRBVec<int> &b, int mode, 
      {
       a.Get(k, x);
       b.Get(k, y);
-      out.Push(RB_DtbsCombine2(x, y, mode));
+      int c = RB_DtbsCombine2(x, y, mode);   // MQL5: a reference parameter needs a variable
+      out.Push(c);
      }
   }
 
