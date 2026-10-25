@@ -581,7 +581,6 @@ int OnInit(void)
   {
    g_tester = (bool)MQLInfoInteger(MQL_TESTER);
    g_log.Init(InpJournal, InpMagic);
-   g_meta.Init(InpMagic);
    BuildConfig();
 
    if(_Period != TF)
@@ -589,16 +588,7 @@ int OnInit(void)
    if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
       g_log.Log("WARN", "", "symbol " + _Symbol, "strategy was specified for XAUUSD");
 
-   //--- 1. live trading gate
-   int perm = RB_TradingPermission(g_tester, AccountModeCode(), InpAllowLiveTrading,
-                                   InpLiveConfirmLogin, AccountInfoInteger(ACCOUNT_LOGIN), InpPropRulesVerified);
-   if(perm != 0)
-     {
-      g_log.Log("INIT_REFUSED", "", "account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), RB_PermissionText(perm));
-      return INIT_FAILED;
-     }
-
-   //--- 2. parameters that must be chosen explicitly
+   //--- 1. parameters that must be chosen explicitly
    if(InpStopMode == RB_STOP_FIXED && InpStopUnit == RB_UNIT_NOT_SET)
      {
       g_log.Log("INIT_REFUSED", "", "InpStopUnit not set",
@@ -617,7 +607,59 @@ int OnInit(void)
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   //--- 3. symbol specification
+   //--- 2. account gate. Every non-tester account (demo / prop evaluation included) needs
+   //--- InpLiveConfirmLogin = its login. An account that is not known yet (terminal still
+   //--- logging in / disconnected) is not a permanent refusal: re-checked on later ticks.
+   int perm = TradingPermission();
+   if(perm == 5)
+     {
+      g_wait_account = true;
+      g_ready = false;
+      g_log.Log("INIT_WAIT", "", "account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+                RB_PermissionText(perm) + "; re-checked on every tick, no trading until known");
+      return INIT_SUCCEEDED;
+     }
+   if(perm != 0)
+     {
+      g_log.Log("INIT_REFUSED", "", "account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), RB_PermissionText(perm));
+      return INIT_FAILED;
+     }
+   return AccountInit();
+  }
+
+//--- everything that needs a known account: margin mode, key namespace, state, reconciliation
+int AccountInit(void)
+  {
+   g_wait_account = false;
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+
+   //--- 3. only hedging accounts: metadata, partial fills and close accounting assume one
+   //--- position per order (POSITION_IDENTIFIER = order ticket). Netting would merge positions.
+   long mm = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   if(mm != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+     {
+      g_log.Log("INIT_REFUSED", "", StringFormat("account %I64d margin_mode=%s%s", login,
+                EnumToString((ENUM_ACCOUNT_MARGIN_MODE)mm), g_tester ? " (tester account)" : ""),
+                "HEDGING_ACCOUNT_REQUIRED (netting/exchange accounts are not supported)");
+      return INIT_FAILED;
+     }
+
+   //--- 4. global-variable namespace per account + symbol + magic
+   g_prefix = RB_KeyPrefix(login, _Symbol, InpMagic);
+   g_meta.Init(g_prefix);
+   if(!g_tester)
+      g_log.Init(InpJournal, InpMagic);   // file name now carries the known login
+   if(g_tester)
+     {
+      // optimization passes / repeated runs on one agent must not inherit state
+      int del = GlobalVariablesDeleteAll(g_prefix + ".");
+      g_log.Log("TESTER_RESET", "", "prefix " + g_prefix, StringFormat("%d global variables deleted", del));
+     }
+   else if(GlobalVariableCheck("RBOTE." + IntegerToString(InpMagic) + ".initial_balance"))
+      g_log.Log("WARN", "", "legacy keys RBOTE." + IntegerToString(InpMagic) + ".* found",
+                "ignored: state is now namespaced by account+symbol+magic (" + g_prefix + ")");
+
+   //--- 5. symbol specification
    if(!RB_ReadSymbolSpec(_Symbol, g_spec))
      {
       g_log.Log("INIT_REFUSED", "", RB_SpecText(g_spec), "BAD_SYMBOL_SPEC");
@@ -632,11 +674,20 @@ int OnInit(void)
                           DoubleToString(stop_px / g_spec.tick_size * g_spec.tick_value_loss, 2)));
    if(!g_tester && InpCommissionPerLotRT <= 0.0)
       g_log.Log("WARN", "", "InpCommissionPerLotRT = 0", "lot sizing ignores commission; set the broker value");
+   int exp_modes = (int)SymbolInfoInteger(_Symbol, SYMBOL_EXPIRATION_MODE);
+   long gtc_mode = SymbolInfoInteger(_Symbol, SYMBOL_ORDER_GTC_MODE);
+   if((exp_modes & SYMBOL_EXPIRATION_SPECIFIED) == 0)
+      g_log.Log("WARN", "", StringFormat("expiration_mode=%d gtc_mode=%s", exp_modes,
+                EnumToString((ENUM_SYMBOL_ORDER_GTC_MODE)gtc_mode)),
+                "no server-side expiry: EA-side expiry only, own pending orders are cancelled on EA removal");
+   if(gtc_mode == SYMBOL_ORDERS_DAILY)
+      g_log.Log("WARN", "", "SYMBOL_ORDER_GTC_MODE = DAILY",
+                "broker deletes SL/TP at day end: Reconcile restores the SL every bar (or closes)");
 
    g_lim.initial_balance = InitialBalance();
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
-   g_trade.SetDeviationInPoints(0);
+   g_trade.SetDeviationInPoints(50);   // used by PositionClose (Reconcile)
 
    UpdateDay();
    UpdateHighWaterMark();
@@ -648,20 +699,68 @@ int OnInit(void)
              StringFormat("scale=%s share=%.2f%% cap=%.2f%% edge=%s", InpScaleEnabled ? "on" : "off",
                           InpProfitSharePct, InpMaxRiskPct, InpEdgeEnabled ? "on" : "off"));
    Reconcile("INIT");
+   SweepClosed("INIT");
    g_log.Log("CHALLENGE", "", StringFormat("target=%.2f%% max_trading_days=%d calendar_days=%d start=%s",
              InpProfitTargetPct, InpMaxTradingDays, InpChallengeDays, TimeToString(ChallengeStart())),
              RB_ChallengeText(CheckChallenge()));
    g_ready = true;
    g_log.Log("INIT_OK", "", g_tester ? "tester" : (AccountModeCode() == RB_ACC_DEMO ? "demo" : "LIVE"),
-             StringFormat("rr=%.1f fib=%.2f stop_mode=%s risk=%.2f%% daily=%.2f%%",
-                          InpRR, InpFibLevel, EnumToString(InpStopMode), InpRiskPct, InpDailyLossPct));
+             StringFormat("login=%I64d keys=%s rr=%.1f fib=%.2f stop_mode=%s risk=%.2f%% daily=%.2f%% of %s utc_offset=%dh",
+                          login, g_prefix, InpRR, InpFibLevel, EnumToString(InpStopMode), InpRiskPct, InpDailyLossPct,
+                          InpDailyOnInitial ? "initial" : "day-start ref", ServerOffsetSec() / 3600));
    return INIT_SUCCEEDED;
+  }
+
+//--- deferred init: account was unknown at OnInit
+void TryAccountInit(void)
+  {
+   int perm = TradingPermission();
+   if(perm == 5)
+      return;   // still unknown; logged once at OnInit
+   if(perm != 0)
+     {
+      g_wait_account = false;
+      g_log.Log("INIT_REFUSED", "", "account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), RB_PermissionText(perm));
+      ExpertRemove();
+      return;
+     }
+   g_log.Log("ACCOUNT_KNOWN", "", "account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), "completing init");
+   if(AccountInit() != INIT_SUCCEEDED)
+     {
+      g_ready = false;
+      ExpertRemove();
+     }
   }
 
 void OnDeinit(const int reason)
   {
+   //--- orders without server-side expiry would outlive the EA-side expiry: cancel them (best effort)
+   int cancelled = 0, failed = 0;
+   if(g_prefix != "")
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong t = OrderGetTicket(i);
+         if(t == 0 || OrderGetInteger(ORDER_MAGIC) != InpMagic || OrderGetString(ORDER_SYMBOL) != _Symbol)
+            continue;
+         if(OrderGetInteger(ORDER_TYPE_TIME) == ORDER_TIME_SPECIFIED)
+            continue;
+         string cmt = OrderGetString(ORDER_COMMENT);
+         if(g_trade.OrderDelete(t))
+           {
+            cancelled++;
+            g_log.Log("ORDER_CANCELLED", cmt, "ticket " + IntegerToString((long)t), "DEINIT_NO_SERVER_EXPIRY");
+            ReleaseOrderMeta(t);
+           }
+         else
+           {
+            failed++;
+            g_log.Log("ORDER_CANCEL_FAILED", cmt, "ticket " + IntegerToString((long)t),
+                      "DEINIT_NO_SERVER_EXPIRY retcode=" + IntegerToString((long)g_trade.ResultRetcode()));
+           }
+        }
    g_log.Log("DEINIT", "", "reason=" + IntegerToString(reason),
-             "pending orders stay at the broker with SL/TP and server-side expiry");
+             StringFormat("orders without server expiry: %d cancelled, %d failed; others stay with SL/TP and server-side expiry",
+                          cancelled, failed));
   }
 
 //+------------------------------------------------------------------+
@@ -690,13 +789,28 @@ void Reconcile(const string when)
       ulong id   = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
       string cmt = PositionGetString(POSITION_COMMENT);
       double sl  = PositionGetDouble(POSITION_SL);
+      bool   buy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
       double msl = g_meta.Get(id, "sl");
       int act = RB_ReconcilePosition(sl > 0.0, msl > 0.0);
       if(act == RB_REC_SET_SL)
         {
-         bool ok = g_trade.PositionModify(t, msl, g_meta.Get(id, "tp"));
-         g_log.Log("RECONCILE_SET_SL", cmt, when + " position " + IntegerToString((long)t),
-                   ok ? "missing SL restored" : "modify failed: " + IntegerToString((long)g_trade.ResultRetcode()));
+         //--- restore the stored SL; if price is already beyond it or the modify fails, close
+         MqlTick tk;
+         bool have   = SymbolInfoTick(_Symbol, tk) && tk.bid > 0.0 && tk.ask > 0.0;
+         bool beyond = have && (buy ? tk.bid <= msl : tk.ask >= msl);
+         bool ok = false;
+         if(have && !beyond)
+            ok = g_trade.PositionModify(t, NormalizeDouble(msl, _Digits), NormalizeDouble(g_meta.Get(id, "tp"), _Digits));
+         if(ok)
+           {
+            g_log.Log("RECONCILE_SET_SL", cmt, when + " position " + IntegerToString((long)t), "missing SL restored");
+            continue;
+           }
+         string why = !have ? "no quote" : beyond ? "price already beyond stored SL " + DoubleToString(msl, _Digits)
+                                                  : "SL restore failed: " + IntegerToString((long)g_trade.ResultRetcode());
+         bool closed = g_trade.PositionClose(t);
+         g_log.Log("RECONCILE_CLOSE", cmt, when + " position " + IntegerToString((long)t),
+                   why + (closed ? " -> unprotected position closed" : " -> close failed: " + IntegerToString((long)g_trade.ResultRetcode())));
         }
       else if(act == RB_REC_CLOSE)
         {
@@ -708,6 +822,22 @@ void Reconcile(const string when)
   }
 
 //+------------------------------------------------------------------+
+//--- the order `t` is no longer pending: drop its metadata, unless a (partially filled)
+//--- position with that identifier lives on or its closed trade still needs accounting
+void ReleaseOrderMeta(ulong t)
+  {
+   if(!g_meta.Has(t))
+      return;
+   if(PositionExistsById(t))
+     {
+      g_log.Log("META_KEPT", "", "order " + IntegerToString((long)t), "partially filled: metadata kept for the open position");
+      return;
+     }
+   if(ProcessClosedPosition(t, true))
+      return;
+   g_meta.Delete(t);
+  }
+
 void CancelOrder(ulong t, const string reason)
   {
    string id = "";
@@ -717,7 +847,7 @@ void CancelOrder(ulong t, const string reason)
    g_log.Log(ok ? "ORDER_CANCELLED" : "ORDER_CANCEL_FAILED", id, "ticket " + IntegerToString((long)t),
              ok ? reason : reason + " retcode=" + IntegerToString((long)g_trade.ResultRetcode()));
    if(ok)
-      g_meta.Delete(t);
+      ReleaseOrderMeta(t);
   }
 
 void CancelAllPending(const string reason)
