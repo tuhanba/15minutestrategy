@@ -3217,7 +3217,7 @@ input group "Entry / exit"
 input double InpFibLevel           = 0.79;    // Fibonacci entry level on the RB range
 input ENUM_RB_STOP_MODE InpStopMode = RB_STOP_FIXED; // Stop mode
 input double InpStopDistance       = 10.0;    // Fixed stop distance (source: 10)
-input ENUM_RB_DIST_UNIT InpStopUnit = RB_UNIT_NOT_SET; // Unit of the stop distance - MUST be chosen
+input ENUM_RB_DIST_UNIT InpStopUnit = RB_UNIT_PRICE; // Unit of the stop distance (PRICE: 10.0 = 10.00 $ on XAUUSD)
 input double InpStructuralBuffer   = 0.30;    // Structural stop: buffer beyond RB extreme (price)
 input bool   InpRequireSlBeyondRb  = true;    // Fixed stop must be beyond the RB extreme
 input double InpRR                 = 6.0;     // Target in R (6 source, 5 alternative)
