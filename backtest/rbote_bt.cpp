@@ -750,7 +750,7 @@ static void usage()
        "  --commission 6 --slip-ticks 10 --friday-cutoff 20 --expiry 8\n"
        "  --swap-long -40 --swap-short 15 ($/lot/night, x3 Wednesday) --end-close on|off --daily-on-initial on|off\n"
        "  --firm-daily 3 --firm-daily-initial on|off --firm-max 6 --firm-dd-trailing on|off   (reported only)\n"
-       "  --rr 6 --fib 0.79 --stop fixed|structural --stop-dist 10 --stop-unit price|points|ticks --buffer 0.30 --max-stop-atr 3\n"
+       "  --rr 6 --fib 0.79 --stop fixed|structural|atr --stop-atr 2 --stop-dist 10 --stop-unit price|points|ticks --buffer 0.30 --max-stop-atr 3 --min-stop-atr 0\n"
        "  --wick 0.5 --close-rule body|close --confirm rb|next --zone-age 192\n"
        "  --regime neutral|policy|off   --adaptive on|off\n"
        "  --be-r X --be-offset-r Y --trail-start-r X --trail-r Y --partial-r X --partial-frac F");
@@ -815,7 +815,12 @@ int main(int argc, char **argv)
       else if(a == "--expiry") o.expiry_bars = (int)num();
       else if(a == "--rr") o.cfg.rr = num();
       else if(a == "--fib") o.cfg.fib_level = num();
-      else if(a == "--stop") o.cfg.stop_mode = next() == "structural" ? RB_STOP_STRUCTURAL : RB_STOP_FIXED;
+      else if(a == "--stop")
+        {
+         std::string m = next();
+         o.cfg.stop_mode = m == "structural" ? RB_STOP_STRUCTURAL : m == "atr" ? RB_STOP_ATR : RB_STOP_FIXED;
+        }
+      else if(a == "--stop-atr") o.cfg.stop_atr_mult = num();
       else if(a == "--stop-dist") o.cfg.stop_distance = num();
       else if(a == "--stop-unit")
         {
@@ -824,6 +829,7 @@ int main(int argc, char **argv)
         }
       else if(a == "--buffer") o.cfg.structural_buffer = num();
       else if(a == "--max-stop-atr") o.cfg.max_stop_atr = num();
+      else if(a == "--min-stop-atr") o.cfg.min_stop_atr = num();
       else if(a == "--wick") o.cfg.rb_min_wick_ratio = num();
       else if(a == "--close-rule") o.cfg.rb_close_rule = next() == "close" ? RB_CLOSE_NOT_THROUGH : RB_CLOSE_BODY_OUTSIDE;
       else if(a == "--confirm") o.cfg.rb_confirm = next() == "next" ? RB_CONFIRM_NEXT_CLOSE : RB_CONFIRM_RB_CLOSE;

@@ -1,9 +1,10 @@
 ; RBOTE preset for an Upcomers Ash Turbo 100k account (DEMO / evaluation use)
+; WARNING: RBOTE alone had no edge in 2020-2023 (PF 0.97 after costs, D-038). Demo comparison only.
 ; Rules (help.upcomers.com, read 2026-10-24, user must confirm): 2% target, max 7 trading days
 ; (days with a closed trade) within 30 calendar days, daily loss 3 000 $, 6% trailing floor.
 ; Risk per trade stays 0.25% until the challenge simulation picks a value (manager D-022: <= 0.35%
 ; unless Upcomers confirms that passing with a single win is allowed).
-; RBOTE stop: STRUCTURAL = RB wick extreme -+ 0.30, trade skipped if stop > 3 x ATR(14). Lot sized from stop so loss = risk %.
+; RBOTE stop: FIXED 10.00 price (least bad of fixed/structural/ATR in 2020-2023, still PF 0.97 after costs).
 ; Account confirmed 2026-10-25: XAUUSD digits 2, point 0.01 (10.00 price = 1000 points).
 InpAllowLiveTrading=false
 ; REQUIRED outside the Strategy Tester on EVERY account (demo / prop evaluation too):
@@ -16,7 +17,7 @@ InpEnableDTBS=false
 InpMagicDTBS=7915791
 InpFibLevel=0.79
 InpRR=6
-InpRbStopMode=1
+InpRbStopMode=0
 InpStopDistance=10.0
 InpRbStopUnit=0
 InpStructuralBuffer=0.30

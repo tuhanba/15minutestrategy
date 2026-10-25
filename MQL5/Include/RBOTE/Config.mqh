@@ -32,11 +32,13 @@ struct RBConfig
    int    stop_mode;            // ENUM_RB_STOP_MODE
    double stop_distance;        // source: 10 - unit MUST be set explicitly
    int    stop_unit;            // ENUM_RB_DIST_UNIT, RB_UNIT_NOT_SET rejects every trade
-   double structural_buffer;    // price units, only for RB_STOP_STRUCTURAL
+   double structural_buffer;    // price units, RB_STOP_STRUCTURAL and RB_STOP_ATR
+   double stop_atr_mult;        // RB_STOP_ATR: stop distance = mult * ATR at the RB
    bool   require_sl_beyond_rb; // fixed stop must sit at/below RB low (bull) / at/above RB high (bear)
    double rr;                   // 6 (source), 5 as alternative
    double min_stop_spread_mult; // stop distance must be >= mult * current spread
    double max_stop_atr;         // stop distance must be <= mult * ATR at the RB (0 = off); structural mode only
+   double min_stop_atr;         // stop distance must be >= mult * ATR at the RB (0 = off); structural mode only
 
    void              Defaults(void)
      {
@@ -60,10 +62,12 @@ struct RBConfig
       stop_distance        = 10.0;
       stop_unit            = RB_UNIT_NOT_SET;
       structural_buffer    = 0.0;
+      stop_atr_mult        = 2.0;
       require_sl_beyond_rb = true;
       rr                   = 6.0;
       min_stop_spread_mult = 2.0;
       max_stop_atr         = 3.0;
+      min_stop_atr         = 0.0;
      }
   };
 

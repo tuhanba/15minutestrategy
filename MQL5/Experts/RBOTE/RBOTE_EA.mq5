@@ -35,7 +35,7 @@ input bool   InpPropRulesVerified  = false;   // Real account: prop-firm rules v
 input long   InpMagic              = 7915790; // Magic number (RBOTE)
 
 input group "Strategies"
-input bool   InpEnableRBOTE        = true;    // Strategy 1: RBOTE (rejection block + OTE limit)
+input bool   InpEnableRBOTE        = false;   // Strategy 1: RBOTE (OFF: no edge in 2020-2023 backtest, D-038)
 input bool   InpEnableDTBS         = true;    // Strategy 2: DTBS (dynamic trend break, market entry)
 input long   InpMagicDTBS          = 7915791; // Magic number (DTBS), must differ from InpMagic
 
@@ -66,11 +66,13 @@ enum ENUM_RB_EA_STOP_UNIT
 
 input group "Entry / exit"
 input double InpFibLevel           = 0.79;    // Fibonacci entry level on the RB range
-input ENUM_RB_STOP_MODE InpRbStopMode = RB_STOP_STRUCTURAL; // RBOTE stop mode (STRUCTURAL: RB wick extreme + buffer)
+input ENUM_RB_STOP_MODE InpRbStopMode = RB_STOP_FIXED; // RBOTE stop mode (FIXED 10.00 = least bad in 2020-2023, D-038)
 input double InpStopDistance       = 10.0;    // FIXED mode only: stop distance (comparison variant)
 input ENUM_RB_EA_STOP_UNIT InpRbStopUnit = RB_EA_UNIT_PRICE; // FIXED mode only: unit of the stop distance
-input double InpStructuralBuffer   = 0.30;    // Structural stop: buffer beyond RB extreme (price)
-input double InpMaxStopATR         = 3.0;     // Structural stop: skip trade if stop > x ATR(14) (0 = off)
+input double InpStructuralBuffer   = 0.30;    // STRUCTURAL/ATR stop: buffer beyond RB extreme (price)
+input double InpRbStopATR          = 3.0;     // ATR stop: distance = x ATR(14) (never inside the RB extreme)
+input double InpMaxStopATR         = 3.0;     // STRUCTURAL/ATR stop: skip trade if stop > x ATR(14) (0 = off)
+input double InpMinStopATR         = 0.0;     // STRUCTURAL/ATR stop: skip trade if stop < x ATR(14) (0 = off)
 input bool   InpRequireSlBeyondRb  = true;    // Fixed stop must be beyond the RB extreme
 input double InpRR                 = 6.0;     // Target in R (6 source, 5 alternative)
 input double InpMinStopSpreadMult  = 2.0;     // Stop >= mult x current spread
@@ -277,6 +279,8 @@ void BuildConfig(void)
    g_cfg.stop_unit            = (int)InpRbStopUnit;
    g_cfg.structural_buffer    = InpStructuralBuffer;
    g_cfg.max_stop_atr         = InpMaxStopATR;
+   g_cfg.min_stop_atr         = InpMinStopATR;
+   g_cfg.stop_atr_mult        = InpRbStopATR;
    g_cfg.require_sl_beyond_rb = InpRequireSlBeyondRb;
    g_cfg.rr                   = InpRR;
    g_cfg.min_stop_spread_mult = InpMinStopSpreadMult;
@@ -667,7 +671,7 @@ int OnInit(void)
                             !(InpVolLowThr < InpVolHighThr && InpVolHighThr < InpVolExtremeThr))) ||
       InpMaxRiskPct < InpRiskPct || InpMaxRiskPct > 2.0 || InpProfitSharePct < 0.0 ||
       InpEdgeMinMult <= 0.0 || InpEdgeMinMult > 1.0 || InpEdgeMaxMult < 1.0 || InpEdgePrior < 0.0 ||
-      InpMaxStopATR < 0.0 || InpStructuralBuffer < 0.0)
+      InpMaxStopATR < 0.0 || InpMinStopATR < 0.0 || !(InpRbStopATR > 0.0) || InpStructuralBuffer < 0.0)
      {
       g_log.Log("INIT_REFUSED", "", "invalid inputs", "check fib/rr/risk/lookback");
       return INIT_PARAMETERS_INCORRECT;

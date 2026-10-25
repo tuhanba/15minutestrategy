@@ -529,6 +529,34 @@ void Test_FibAndPlan(CRBTest &t)
    cs.max_stop_atr = 3.0;
    g.atr = 0.0;                    // unknown ATR never blocks
    t.Check(RB_BuildPlan(g, cs, sp, p) == 0, "ATR unknown -> cap skipped");
+   cs.min_stop_atr = 3.0;          // stop 2.40 < 3 x 1.00 -> too tight
+   g.atr = 1.00;
+   t.Check(RB_BuildPlan(g, cs, sp, p) == 20, "structural stop tighter than min x ATR rejected");
+   t.Check(RB_ReasonText(20) == "STOP_TOO_TIGHT_ATR", "reason text 20");
+   cs.min_stop_atr = 0.0;
+
+   // ATR stop: entry 2652.10, k = 2, ATR 2 -> SL 2648.10 (farther than RB low - buffer 2649.70)
+   RBConfig ca;
+   T_Cfg(ca);
+   ca.stop_mode = RB_STOP_ATR;
+   ca.structural_buffer = 0.30;
+   ca.stop_atr_mult = 2.0;
+   g.atr = 2.00;
+   t.Check(RB_BuildPlan(g, ca, sp, p) == 0, "ATR stop plan ok");
+   t.Near(p.sl, 2648.10, 1e-6, "ATR stop = entry - 2 x ATR");
+   ca.max_stop_atr = 0.0;          // cap off: isolate the "farther of the two" rule
+   g.atr = 0.50;                   // 2 x 0.5 = 1.00 would sit inside the RB -> RB low - buffer wins
+   t.Check(RB_BuildPlan(g, ca, sp, p) == 0, "ATR stop small ATR plan ok");
+   t.Near(p.sl, 2649.70, 1e-6, "ATR stop never inside RB extreme - buffer");
+   ca.max_stop_atr = 3.0;
+   g.dir = RB_DIR_BEAR;            // bear: entry 2657.90, SL 2657.90 + 4.00
+   g.atr = 2.00;
+   RB_BuildPlan(g, ca, sp, p);
+   t.Near(p.sl, 2661.90, 1e-6, "bear ATR stop = entry + 2 x ATR");
+   g.dir = RB_DIR_BULL;
+   g.atr = 0.0;
+   t.Check(RB_BuildPlan(g, ca, sp, p) == 5, "ATR stop without ATR rejected");
+
    c10.max_stop_atr = 3.0;
    g.atr = 0.70;                   // fixed mode: cap not applied (fixed stop is the user's choice)
    t.Check(RB_BuildPlan(g, c10, sp, p) != 19, "ATR cap ignored in fixed mode");

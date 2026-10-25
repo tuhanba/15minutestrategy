@@ -41,6 +41,7 @@ string RB_ReasonText(int code)
       case 17: return "BAD_RISK_MONEY";
       case 18: return "BAD_RR";
       case 19: return "STOP_TOO_WIDE_ATR";
+      case 20: return "STOP_TOO_TIGHT_ATR";
      }
    return "UNKNOWN";
   }
@@ -131,6 +132,15 @@ int RB_BuildPlan(const RBSignal &sig, const RBConfig &cfg, const RBSymbolSpec &s
          return 5;
       sl = (dir == RB_DIR_BULL) ? RB_RoundDownToTick(L - cfg.structural_buffer, sp.tick_size)
                                 : RB_RoundUpToTick(H + cfg.structural_buffer, sp.tick_size);
+      if(cfg.stop_mode == RB_STOP_ATR)
+        {
+         if(!(cfg.stop_atr_mult > 0.0) || !(sig.atr > 0.0))
+            return 5;
+         // k x ATR from the entry; the RB extreme still bounds it (the farther of the two wins)
+         double sl_atr = (dir == RB_DIR_BULL) ? RB_RoundDownToTick(entry - cfg.stop_atr_mult * sig.atr, sp.tick_size)
+                                              : RB_RoundUpToTick(entry + cfg.stop_atr_mult * sig.atr, sp.tick_size);
+         sl = (dir == RB_DIR_BULL) ? MathMin(sl, sl_atr) : MathMax(sl, sl_atr);
+        }
      }
    if(dir == RB_DIR_BULL && !(sl < entry))
       return 6;
@@ -141,9 +151,13 @@ int RB_BuildPlan(const RBSignal &sig, const RBConfig &cfg, const RBSymbolSpec &s
    if(risk < sp.tick_size - RB_EPS)
       return 5;
    // Structural stop on an oversized RB: lot would collapse and the setup is atypical, skip it.
-   if(cfg.stop_mode == RB_STOP_STRUCTURAL && cfg.max_stop_atr > 0.0 && sig.atr > 0.0
+   if(cfg.stop_mode != RB_STOP_FIXED && cfg.max_stop_atr > 0.0 && sig.atr > 0.0
       && risk > cfg.max_stop_atr * sig.atr + RB_EPS)
       return 19;
+   // Stop inside the bar-to-bar noise: a big lot gets stopped by spread and wicks within minutes.
+   if(cfg.stop_mode != RB_STOP_FIXED && cfg.min_stop_atr > 0.0 && sig.atr > 0.0
+      && risk < cfg.min_stop_atr * sig.atr - RB_EPS)
+      return 20;
    double tp = (dir == RB_DIR_BULL) ? entry + cfg.rr * risk : entry - cfg.rr * risk;
    tp = RB_RoundToTick(tp, sp.tick_size);
    if(dir == RB_DIR_BULL && !(tp > entry))

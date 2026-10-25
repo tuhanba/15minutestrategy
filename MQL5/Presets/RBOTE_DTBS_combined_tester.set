@@ -1,17 +1,18 @@
 ; RBOTE + DTBS tester preset: both strategies in one EA, baseline settings
-; RBOTE = 6R, STRUCTURAL stop (RB wick extreme -+ 0.30, skip if stop > 3 x ATR14), regime logged only, flat risk.
+; RBOTE (off by default) = 6R, FIXED 10.00 stop. DTBS = the strategy under test.
 ; Risk and limits are account-wide (daily loss, open risk); positions/pending/trades per day per strategy.
 ; Multi-year research: challenge rules OFF, total-DD floor OFF, commission 5 $/lot.
 InpAllowLiveTrading=false
 ; InpLiveConfirmLogin is ignored in the tester; outside it EVERY account needs it = its login.
 InpLiveConfirmLogin=0
 InpMagic=7915790
-InpEnableRBOTE=true
+; RBOTE OFF: no edge in 2020-2023 backtest (PF < 1 in every stop variant, D-038). Set true only to compare.
+InpEnableRBOTE=false
 InpEnableDTBS=true
 InpMagicDTBS=7915791
 InpFibLevel=0.79
 InpRR=6
-InpRbStopMode=1
+InpRbStopMode=0
 InpStopDistance=10.0
 InpRbStopUnit=0
 InpStructuralBuffer=0.30

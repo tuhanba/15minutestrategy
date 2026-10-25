@@ -40,7 +40,8 @@ enum ENUM_RB_CONFIRM
 enum ENUM_RB_STOP_MODE
   {
    RB_STOP_FIXED      = 0, // fixed distance from entry (source: "Stop: 10.00")
-   RB_STOP_STRUCTURAL = 1  // RB extreme -/+ buffer (comparison variant)
+   RB_STOP_STRUCTURAL = 1, // RB extreme -/+ buffer
+   RB_STOP_ATR        = 2  // k x ATR from entry, never inside the RB extreme -/+ buffer
   };
 
 enum ENUM_RB_DIST_UNIT

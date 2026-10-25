@@ -104,7 +104,7 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
 3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=234 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
-   - Varsayılan stop YAPISAL (RB fitil ucu ± 0.30, > 3 × ATR ise işlem yok). `InpRbStopUnit` yalnız FIXED karşılaştırma modunda kullanılır (`PRICE`: 10 = 10.00 $).
+   - RBOTE varsayılan KAPALI (2020-2023 IS: hiçbir stop varyantı kârlı değil, `reports/rbote_stop_IS_2020_2023.md`). Stop modları: FIXED (varsayılan, 10.00 PRICE), STRUCTURAL, ATR.
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
 5. Journal: `MQL5/Files/RBOTE/<sembol>_<magic>_<login>_journal.csv`. Tester'da: `Common/Files/RBOTE/tester_*`.
 

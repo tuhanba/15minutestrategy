@@ -6,7 +6,7 @@ v0.1 → v0.2 değişiklikleri:
 - Platform kararı: **saf MQL5 EA** (kullanıcı kararı). Python yolu kaldırıldı.
 - Fibonacci **yalnızca RB sınırlarına** çizilir (kaynak görsel). "Swing bacağı" modu kaldırıldı.
 - RB tanımı görsele göre tek mum: fitil = Fib 1, gövde ucu = Fib 0.
-- Varsayılan stop: YAPISAL (RB fitil ucu ± 0.30, stop > 3 × ATR ise işlem yok). Kaynağın sabit "10" mesafesi yalnız karşılaştırma varyantı (kullanıcı: "sadece örnekti").
+- RBOTE varsayılan KAPALI: 2020-2023 IS'te hiçbir stop varyantı kârlı değil (reports/rbote_stop_IS_2020_2023.md, D-038). Stop varsayılanı sabit 10.00 (en az kötü).
 - Varsayılan hedef 6R, alternatif 5R.
 
 ---
@@ -101,8 +101,9 @@ Bearish:  Entry = L + 0.79 × (H − L)   → Sell Limit  (tick'e yukarı yuvarl
 
 | Mod | Long SL | Short SL | Not |
 |---|---|---|---|
-| `STRUCTURAL` (varsayılan, 2026-10-25 / D-037) | `L − buffer` | `H + buffer` | buffer 0.30. Stop > `InpMaxStopATR` (3) × ATR14 (RB mumu) ise işlem yok (`STOP_TOO_WIDE_ATR`); 0 = kapalı |
-| `FIXED` (karşılaştırma) | `Entry − d` | `Entry + d` | d = `InpStopDistance` × birim. SL tick'e **girişe doğru** yuvarlanır, asla genişlemez. Kaynaktaki "10" yalnız örnekti (kullanıcı) |
+| `FIXED` (varsayılan, D-038) | `Entry − d` | `Entry + d` | d = `InpStopDistance` × birim. SL tick'e **girişe doğru** yuvarlanır, asla genişlemez. Kaynaktaki "10" yalnız örnekti (kullanıcı); yine de IS'te en az kötü varyant (PF 0.97) |
+| `STRUCTURAL` (karşılaştırma) | `L − buffer` | `H + buffer` | IS 2020-2023: −0.49R/işlem (D-038). `InpMaxStopATR` / `InpMinStopATR` sınırları |
+| `ATR` (araştırma) | `min(L − buffer, Entry − k·ATR)` | `max(H + buffer, Entry + k·ATR)` | k = `InpRbStopATR`; IS'te k 1–4 hepsi negatif |
 
 - `InpRequireSlBeyondRb = true`: sabit stop RB'nin dış ucunun **ötesinde değilse** (long: `SL > L`) işlem reddedilir. Görselde stop Fib 1'in hemen altındadır.
   Sonuç: RB yüksekliği `d / 0.21`'i aşarsa sinyal reddedilir (d = 10 için RB > 47.6 fiyat birimi).
