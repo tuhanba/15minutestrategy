@@ -1,0 +1,176 @@
+{
+  ".claude/hooks/install-graphify.sh": {
+    "mtime": 1792923922.9242418,
+    "seen": 1792923934.4245641,
+    "ast_hash": "5a338f57f787d2066c8b0e36fce3615d",
+    "semantic_hash": ""
+  },
+  ".claude/settings.json": {
+    "mtime": 1792923922.9607968,
+    "seen": 1792923934.424572,
+    "ast_hash": "f1e76c6ddaecb864520d0748ff03ba51",
+    "semantic_hash": ""
+  },
+  "backtest/rbote_bt.cpp": {
+    "mtime": 1792923797.515822,
+    "seen": 1792923934.4245753,
+    "ast_hash": "e39acd951a1b4542bfbfacc234f1d0bb",
+    "semantic_hash": ""
+  },
+  "config/prop_firm.example.yaml": {
+    "mtime": 1792923797.515822,
+    "seen": 1792923934.4245777,
+    "ast_hash": "3f11e66d4d5477536a769ac5cfdd52de",
+    "semantic_hash": ""
+  },
+  "tests/cpp/run_tests.cpp": {
+    "mtime": 1792923797.5288393,
+    "seen": 1792923934.4245794,
+    "ast_hash": "045dd0489f7ea6355bac5f598f306688",
+    "semantic_hash": ""
+  },
+  "tools/analyze_trades.py": {
+    "mtime": 1792923797.5288393,
+    "seen": 1792923934.4245808,
+    "ast_hash": "986b36749c569c5aef2f939674b6d813",
+    "semantic_hash": ""
+  },
+  "tools/compile_mql5.sh": {
+    "mtime": 1792923797.5293145,
+    "seen": 1792923934.4245827,
+    "ast_hash": "990f22b77d52d1c54c0143de0d79d5d3",
+    "semantic_hash": ""
+  },
+  "tools/fetch_dukascopy.py": {
+    "mtime": 1792923797.5293145,
+    "seen": 1792923934.4245842,
+    "ast_hash": "0df47e1ad2e6e3f4a76bd25cb9f2ec7a",
+    "semantic_hash": ""
+  },
+  "tools/make_single_file.py": {
+    "mtime": 1792923797.5293145,
+    "seen": 1792923934.4245858,
+    "ast_hash": "ab3c74b36c6f2b2ed4e86accf6c8d511",
+    "semantic_hash": ""
+  },
+  "tools/mt5/compare_trades.py": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.424587,
+    "ast_hash": "903e7a2a36498725f06713d8217a3cf6",
+    "semantic_hash": ""
+  },
+  "tools/mt5/cpp_signals.cpp": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.424589,
+    "ast_hash": "703efb8db56ba4dbecf3f5ed98e6e209",
+    "semantic_hash": ""
+  },
+  "tools/mt5/run_import.sh": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4245903,
+    "ast_hash": "7f8d80d66e76f296b39d039a562a7e88",
+    "semantic_hash": ""
+  },
+  "tools/mt5/run_script.sh": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.424592,
+    "ast_hash": "aab755ba44431491f73edae9081ed477",
+    "semantic_hash": ""
+  },
+  "tools/mt5/run_tester.sh": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4245934,
+    "ast_hash": "ad28e1212a1f21cb53f94f14798460be",
+    "semantic_hash": ""
+  },
+  "tools/prop_sim.py": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4245949,
+    "ast_hash": "c76de5fe61c27866e69d7504534686ac",
+    "semantic_hash": ""
+  },
+  "tools/run_research.py": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4245963,
+    "ast_hash": "840cec2ea6ebe52632c48bf8767f1a08",
+    "semantic_hash": ""
+  },
+  "tools/tests/test_analyze_trades.py": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4245975,
+    "ast_hash": "1b1e553f763b6ce83eaa5cd1f88507f6",
+    "semantic_hash": ""
+  },
+  "tools/tests/test_backtester.py": {
+    "mtime": 1792923797.531569,
+    "seen": 1792923934.4245987,
+    "ast_hash": "e4ceb0628c0824433c75bc01ffc2ee41",
+    "semantic_hash": ""
+  },
+  "tools/tests/test_prop_sim.py": {
+    "mtime": 1792923797.531569,
+    "seen": 1792923934.4246001,
+    "ast_hash": "ebce9ebb681b05bdd462ae88bbe0b7ed",
+    "semantic_hash": ""
+  },
+  ".claude/CLAUDE.md": {
+    "mtime": 1792923898.0809736,
+    "seen": 1792923934.4246016,
+    "ast_hash": "9b31786b637be3c13978bec4c2330752",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1792923898.081252,
+    "seen": 1792923934.424603,
+    "ast_hash": "67d88e9d0760c3ba54c75dfd9551c1c5",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1792923797.515822,
+    "seen": 1792923934.4246042,
+    "ast_hash": "b5a17fdb2dd80c0603075ea47eece48a",
+    "semantic_hash": ""
+  },
+  "docs/01_STRATEJI_SPESIFIKASYONU.md": {
+    "mtime": 1792923797.5214882,
+    "seen": 1792923934.4246066,
+    "ast_hash": "758c5737f4fe2cf15f4c237fc83f346d",
+    "semantic_hash": ""
+  },
+  "docs/02_DTBS_SPESIFIKASYONU.md": {
+    "mtime": 1792923797.528398,
+    "seen": 1792923934.4246078,
+    "ast_hash": "c9b3d2e96f84d7262b45a501707f677e",
+    "semantic_hash": ""
+  },
+  "docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md": {
+    "mtime": 1792923797.528398,
+    "seen": 1792923934.424609,
+    "ast_hash": "3fe911d693df8e401b73dc05144fa9c0",
+    "semantic_hash": ""
+  },
+  "docs/BACKTEST.md": {
+    "mtime": 1792923797.528398,
+    "seen": 1792923934.4246104,
+    "ast_hash": "4be028fcae7d1f0850612991dec63ffb",
+    "semantic_hash": ""
+  },
+  "reports/dtbs_2020_2026.md": {
+    "mtime": 1792923797.528398,
+    "seen": 1792923934.4246118,
+    "ast_hash": "966666bd59849d0ca7a4a71c2b81875f",
+    "semantic_hash": ""
+  },
+  "reports/rbote_stop_IS_2020_2023.md": {
+    "mtime": 1792923797.5287957,
+    "seen": 1792923934.4246132,
+    "ast_hash": "5a0e2b791d597dae313604c73fce2b2c",
+    "semantic_hash": ""
+  },
+  "tools/mt5/README.md": {
+    "mtime": 1792923797.5301065,
+    "seen": 1792923934.4246147,
+    "ast_hash": "f416346fad1fb023ee91f1dec57ac0e8",
+    "semantic_hash": ""
+  }
+}

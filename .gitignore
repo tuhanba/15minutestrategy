@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 *.ex5
 data/
+graphify-out/cache/
