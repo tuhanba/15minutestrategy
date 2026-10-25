@@ -37,7 +37,7 @@ def test_daily_breach_uses_floating_mae():
 def test_static_max_loss():
     # -1R per day at 1% risk: daily never breached (-1%), static -6% hit on day 7
     days = days_from([[(-1.0, -1.0)]] * 10)
-    out = ps.attempt(it(days), ps.PROGRAMS["phoenix"], 0.01)
+    out = ps.attempt(it(days), ps.PROGRAMS["phoenix"], 0.01, personal_dd=0)
     assert out.reason == "max_loss"
     assert out.trading_days == 7
 
@@ -45,7 +45,7 @@ def test_static_max_loss():
 def test_trailing_floor_follows_peak():
     # Thunderbolt: +4% then losses; the floor trails the peak (104k - 6k = 98k) instead of 94k
     days = days_from([[(4.0, 0.0)]] + [[(-1.0, -1.0)]] * 10)
-    out = ps.attempt(it(days), ps.PROGRAMS["thunderbolt"], 0.01)
+    out = ps.attempt(it(days), ps.PROGRAMS["thunderbolt"], 0.01, personal_dd=0)
     assert out.reason == "max_loss"
     assert out.trading_days <= 8
 

@@ -34,9 +34,14 @@ Modelled rules (help.upcomers.com, read 2026-10-24; the user must confirm them):
   time limits : calendar days use real dates (fail when date >= start + N days);
                 weekday limit counts Mon-Fri dates since the start;
                 active-day limit counts days with >= 1 closed trade (Ash Turbo: 7).
-  personal EA guards (tracked and reported only, the attempt is not stopped): daily loss of
-                `personal_daily` of the day reference, and the equity-peak trailing floor
-                peak * (1 - personal_dd).
+  personal EA guards (ENFORCED like the EA does live, manager D-032):
+                daily  -> equity below ref - personal_daily * (initial or ref, like the firm's daily;
+                          Ash Turbo: 2% of the initial balance, floating via MAE): the trade that hits it
+                          runs to its exit, then no new trades that day; the attempt continues.
+                trailing -> equity below equity_peak - personal_dd * initial (EA RB_TotalDDFloor, peak
+                          incl. MFE): the EA stops; the open trade runs to its exit (a target reached by
+                          that exit still passes), then the attempt ends as "personal_stop".
+                Firm breaches are checked first, so an excursion that breaks both counts as the firm breach.
   all-or-nothing : passes that needed fewer than 5 trades (and exactly 1 trade) are reported.
 """
 from __future__ import annotations
@@ -170,14 +175,15 @@ def load_days(trades_path: Path, daily_path: Path | None, start_balance: float |
 @dataclass
 class Outcome:
     passed: bool = False
-    reason: str = "timeout"     # passed | daily | max_loss | inactivity | timeout | censored
+    reason: str = "timeout"     # passed | daily | max_loss | personal_stop | inactivity | timeout | censored
     trading_days: int = 0       # day entries processed
     calendar_days: int = 0      # real calendar days from the first day (inclusive)
     active_days: int = 0        # days with >= 1 closed trade
     trades: int = 0
     min_phase_trades: int = 10**9
-    personal_daily_hit: bool = False
-    personal_dd_hit: bool = False
+    personal_daily_hit: bool = False   # personal daily guard blocked the rest of at least one day
+    personal_dd_hit: bool = False      # personal trailing floor broken (attempt ends as personal_stop)
+    skipped_trades: int = 0            # trades not taken because the personal daily guard blocked the day
 
 
 def _weekdays(a: date, b: date) -> int:
@@ -190,7 +196,12 @@ def _weekdays(a: date, b: date) -> int:
 
 
 def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max_calendar_days: int = 1100,
-            personal_daily: float = 0.02, personal_dd: float = 0.04) -> Outcome:
+            personal_daily: float = 0.02, personal_dd: float = 0.04,
+            personal_daily_on_initial: bool | None = None) -> Outcome:
+    """One challenge attempt. personal_daily / personal_dd = 0 disable the EA guards.
+    personal_daily_on_initial defaults to the program's firm daily convention."""
+    if personal_daily_on_initial is None:
+        personal_daily_on_initial = prog.daily_on_initial
     out = Outcome()
     start: date | None = None
     for target in prog.targets:
@@ -228,10 +239,16 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
                 continue
             ref = bal
             daily_floor = ref - prog.daily * (initial if prog.daily_on_initial else ref)
-            personal_floor = ref * (1 - personal_daily)
+            personal_floor = (ref - personal_daily * (initial if personal_daily_on_initial else ref)
+                              if personal_daily > 0 else -float("inf"))
             last_activity = day.day
             reached = False
+            blocked = False
+            stop_after = False
             for raw in day.trades:
+                if blocked:
+                    out.skipped_trades += 1
+                    continue
                 t = _trade(raw)
                 risk_money = risk * bal * t.size
                 # equity peak first (conservative): the favourable excursion raises the shield floor
@@ -243,16 +260,19 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
                     if prog.lock_at_initial:
                         floor = min(initial, floor)
                 low = bal + t.mae * risk_money
-                if low < personal_floor:
-                    out.personal_daily_hit = True
-                if low < ppeak * (1 - personal_dd):
-                    out.personal_dd_hit = True
                 if low < daily_floor:
                     out.reason = "daily"
                     return out
                 if low < floor:
                     out.reason = "max_loss"
                     return out
+                # personal guards (after the firm checks): breached during this trade -> act after its exit
+                if personal_dd > 0 and low < ppeak - personal_dd * initial:
+                    out.personal_dd_hit = True
+                    stop_after = True
+                if low < personal_floor:
+                    out.personal_daily_hit = True
+                    blocked = True
                 bal += t.r * risk_money
                 out.trades += 1
                 phase_trades += 1
@@ -262,6 +282,12 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
                 if bal < floor:
                     out.reason = "max_loss"
                     return out
+                if personal_dd > 0 and bal < ppeak - personal_dd * initial:
+                    out.personal_dd_hit = True
+                    stop_after = True
+                if bal < personal_floor:
+                    out.personal_daily_hit = True
+                    blocked = True
                 ppeak = max(ppeak, bal)
                 if prog.trailing and bal > peak:
                     peak = bal
@@ -271,6 +297,9 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
                 if bal >= initial * (1 + target):
                     reached = True
                     break
+                if stop_after:
+                    out.reason = "personal_stop"
+                    return out
             out.active_days += 1
             if reached:
                 out.min_phase_trades = min(out.min_phase_trades, phase_trades)
@@ -325,7 +354,7 @@ def summarize(outs: list[Outcome]) -> dict[str, float]:
     done = [o for o in outs if o.reason != "censored"]
     n = len(done)
     res: dict[str, float] = {"n": float(n), "censored": float(len(outs) - n)}
-    for k in ("passed", "daily", "max_loss", "inactivity", "timeout"):
+    for k in ("passed", "daily", "max_loss", "personal_stop", "inactivity", "timeout"):
         res[k] = sum(1 for o in done if o.reason == k) / n if n else float("nan")
     passed = [o for o in done if o.passed]
     res["median_days"] = statistics.median(o.calendar_days for o in passed) if passed else float("nan")
@@ -335,6 +364,7 @@ def summarize(outs: list[Outcome]) -> dict[str, float]:
     res["few_trades"] = sum(1 for o in passed if o.min_phase_trades < 5) / n if n else float("nan")
     res["personal_daily"] = sum(1 for o in done if o.personal_daily_hit) / n if n else float("nan")
     res["personal_dd"] = sum(1 for o in done if o.personal_dd_hit) / n if n else float("nan")
+    res["skipped"] = statistics.fmean(o.skipped_trades for o in done) if done else float("nan")
     return res
 
 
@@ -346,17 +376,17 @@ def _m(x: float) -> str:
     return "n/a" if x != x else f"{x:g}"
 
 
-TABLE_HEAD = ("| risk/trade | method | pass | fail daily | fail max | inactivity | timeout | censored | "
-              "median calendar days | median active days | median trades | 1-trade pass | <5-trade pass | "
-              "personal daily hit | personal DD hit |\n"
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+TABLE_HEAD = ("| risk/trade | method | pass | fail firm daily | fail firm max | EA personal stop (4% trail) | inactivity | "
+              "timeout | censored | median calendar days | median active days | median trades | 1-trade pass | "
+              "<5-trade pass | personal daily guard blocked a day | trades skipped by it (mean) |\n"
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
 
 def _row(risk: float, method: str, s: dict[str, float]) -> str:
     return (f"| {risk:.3%} | {method} ({int(s['n'])}) | {_p(s['passed'])} | {_p(s['daily'])} | {_p(s['max_loss'])} | "
-            f"{_p(s['inactivity'])} | {_p(s['timeout'])} | {int(s['censored'])} | {_m(s['median_days'])} | "
-            f"{_m(s['median_active'])} | {_m(s['median_trades'])} | {_p(s['single_trade'])} | {_p(s['few_trades'])} | "
-            f"{_p(s['personal_daily'])} | {_p(s['personal_dd'])} |")
+            f"{_p(s['personal_stop'])} | {_p(s['inactivity'])} | {_p(s['timeout'])} | {int(s['censored'])} | "
+            f"{_m(s['median_days'])} | {_m(s['median_active'])} | {_m(s['median_trades'])} | {_p(s['single_trade'])} | "
+            f"{_p(s['few_trades'])} | {_p(s['personal_daily'])} | {_m(round(s['skipped'], 2)) if s['skipped'] == s['skipped'] else 'n/a'} |")
 
 
 def evaluate(days: list[Day], program: str, risks: list[float], runs: int, seed: int, block: int = 5,
@@ -366,16 +396,62 @@ def evaluate(days: list[Day], program: str, risks: list[float], runs: int, seed:
                    "replay": summarize(replay(days, prog, risk, step))} for risk in risks}
 
 
-def decide(results: dict[float, dict[str, dict[str, float]]], cap: float | None = None) -> tuple[float, float] | None:
-    """D-020/D-022/D-027: highest Monte Carlo pass rate with P(daily) < 5% and P(max loss) < 10%; ties -> lower risk."""
+DIVERGENCE_PP = 0.10   # D-031: max pass-rate gap between replay and Monte Carlo at the chosen risk
+
+
+def qualifies(s: dict[str, float]) -> bool:
+    return s["n"] > 0 and s["daily"] < 0.05 and s["max_loss"] < 0.10
+
+
+def decide(results: dict[float, dict[str, dict[str, float]]], cap: float | None = None,
+           method: str = "replay") -> tuple[float, float] | None:
+    """D-020/D-022/D-027 rule for one method: highest pass rate with P(firm daily) < 5% and
+    P(firm max loss) < 10%; ties -> lower risk."""
     best = None
     for risk in sorted(results):
         if cap is not None and risk > cap + 1e-12:
             continue
-        s = results[risk]["mc"]
-        if s["daily"] < 0.05 and s["max_loss"] < 0.10 and (best is None or s["passed"] > best[1] + 1e-12):
+        s = results[risk][method]
+        if qualifies(s) and (best is None or s["passed"] > best[1] + 1e-12):
             best = (risk, s["passed"])
     return best
+
+
+@dataclass
+class Decision:
+    risk: float | None
+    replay_pick: float | None
+    mc_pick: float | None
+    notes: list
+
+
+def decide_combined(results: dict[float, dict[str, dict[str, float]]], cap: float | None = None) -> Decision:
+    """D-031: replay is primary, Monte Carlo the robustness check. Different picks, or a pass-rate gap
+    > 10 pp at the chosen risk -> the LOWER risk (stepping down through risks that qualify under both)."""
+    rp, mp = decide(results, cap, "replay"), decide(results, cap, "mc")
+    notes = []
+    if rp is None or mp is None:
+        if rp is None:
+            notes.append("replay: no risk qualifies")
+        if mp is None:
+            notes.append("Monte Carlo robustness check: no risk qualifies")
+        return Decision(None, rp and rp[0], mp and mp[0], notes)
+    if abs(rp[0] - mp[0]) > 1e-12:
+        notes.append(f"methods disagree (replay {rp[0]:.2%}, Monte Carlo {mp[0]:.2%}) -> lower risk")
+    both = sorted(r for r in results if (cap is None or r <= cap + 1e-12)
+                  and qualifies(results[r]["replay"]) and qualifies(results[r]["mc"]))
+    c = min(rp[0], mp[0])
+    while True:
+        gap = abs(results[c]["replay"]["passed"] - results[c]["mc"]["passed"])
+        if gap <= DIVERGENCE_PP + 1e-12:
+            break
+        lower = [r for r in both if r < c - 1e-12]
+        notes.append(f"pass-rate gap {gap:.1%} at {c:.2%} > {DIVERGENCE_PP:.0%}"
+                     + (f" -> {lower[-1]:.2%}" if lower else " (no lower qualifying risk; kept, divergence reported)"))
+        if not lower:
+            break
+        c = lower[-1]
+    return Decision(c, rp[0], mp[0], notes)
 
 
 def report(days: list[Day], program: str, risks: list[float], runs: int, seed: int, block: int = 5,
@@ -404,10 +480,10 @@ def report(days: list[Day], program: str, risks: list[float], runs: int, seed: i
     for risk in risks:
         lines.append(_row(risk, "Monte Carlo", res[risk]["mc"]))
         lines.append(_row(risk, "replay", res[risk]["replay"]))
-    best, capped = decide(res), decide(res, SELECTION_CAP)
+    best, capped = decide_combined(res), decide_combined(res, SELECTION_CAP)
     val = None
     if validation and any(d.trades for d in validation):
-        val_risks = sorted({x[0] for x in (best, capped) if x})
+        val_risks = sorted({x.risk for x in (best, capped) if x.risk is not None})
         if val_risks:
             val = evaluate(validation, program, val_risks, runs, seed, block, step)
             lines += ["", f"{labels[1]} (validation only, NOT used for the decision): {hist(validation)}", "", TABLE_HEAD]
@@ -415,24 +491,30 @@ def report(days: list[Day], program: str, risks: list[float], runs: int, seed: i
                 lines.append(_row(risk, "Monte Carlo", val[risk]["mc"]))
                 lines.append(_row(risk, "replay", val[risk]["replay"]))
 
-    def verdict(x):
-        if not x:
-            return "**none qualifies**"
-        txt = f"**{x[0]:.3%}** (pass {x[1]:.1%}"
-        s = res[x[0]]["mc"]
-        txt += f", personal daily guard hit {_p(s['personal_daily'])}, personal trailing guard hit {_p(s['personal_dd'])}"
-        if val and x[0] in val:
-            txt += f"; validation pass {_p(val[x[0]]['mc']['passed'])}"
+    def verdict(x: Decision) -> str:
+        def pk(v):
+            return "none" if v is None else f"{v:.2%}"
+        picks = f"replay pick {pk(x.replay_pick)}, Monte Carlo pick {pk(x.mc_pick)}"
+        notes = ("; " + "; ".join(x.notes)) if x.notes else ""
+        if x.risk is None:
+            return f"**none qualifies** ({picks}{notes})"
+        r, m = res[x.risk]["replay"], res[x.risk]["mc"]
+        txt = (f"**{x.risk:.3%}** (replay pass {_p(r['passed'])}, Monte Carlo pass {_p(m['passed'])}, "
+               f"EA personal stop {_p(r['personal_stop'])} / {_p(m['personal_stop'])}; {picks}{notes}")
+        if val and x.risk in val:
+            txt += (f"; validation pass replay {_p(val[x.risk]['replay']['passed'])}, "
+                    f"Monte Carlo {_p(val[x.risk]['mc']['passed'])}")
         return txt + ")"
 
-    lines += ["", f"Decision rule (manager D-020/D-022/D-027), computed once on the {labels[0]}: highest Monte Carlo pass "
-              "rate with P(daily breach) < 5% and P(max-loss breach) < 10%, ties -> lower risk:",
+    lines += ["", f"Decision rule (manager D-020/D-022/D-027/D-031), computed once on the {labels[0]}: per method the "
+              "highest pass rate with P(firm daily breach) < 5% and P(firm max-loss breach) < 10% (ties -> lower risk); "
+              "historical replay is primary, Monte Carlo the robustness check; if they pick different risks or their "
+              f"pass rates at the chosen risk differ by more than {DIVERGENCE_PP:.0%} points, the lower risk is chosen:",
               f"- executable grid (<= {PRESET_MAX_RISK:.2%}): {verdict(best)}",
               f"- capped at {SELECTION_CAP:.2%} until Upcomers confirms that passing with a single win is allowed "
               f"(**this is the risk to use**): {verdict(capped)}",
-              "- additional constraints of the EA (reported, not part of the rule): personal daily guard "
-              "(2% of the day reference) and personal trailing floor (equity peak - 4%); a hit means the EA "
-              "would have stopped trading for the day / for good in that attempt."]
+              "- EA personal guards are enforced (D-032): personal daily 2% (blocks the rest of the day) and personal "
+              "trailing floor equity peak - 4% of initial (EA stops, attempt ends as 'EA personal stop', not a firm breach)."]
     return "\n".join(lines) + "\n"
 
 
