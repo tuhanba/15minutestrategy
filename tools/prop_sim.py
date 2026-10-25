@@ -193,10 +193,10 @@ def attempt(day_iter, prog: Program, risk: float, initial: float = 100000.0, max
             personal_daily: float = 0.02, personal_dd: float = 0.04) -> Outcome:
     out = Outcome()
     start: date | None = None
-    ppeak = initial
     for target in prog.targets:
         bal = initial
         peak = initial
+        ppeak = initial          # personal (EA) equity peak, restarts with each phase account
         floor = initial * (1 - prog.max_loss)
         phase_trades = 0
         last_activity: date | None = None

@@ -2,6 +2,8 @@
 ; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source chart's "Stop: 10.00" as 10.00 price units.
 ; Verify against the source before trusting results. Structural preset ignores the fixed stop.
 InpAllowLiveTrading=false
+; InpLiveConfirmLogin is ignored in the tester; outside it EVERY account needs it = its login.
+InpLiveConfirmLogin=0
 InpMagic=7915790
 InpFibLevel=0.79
 InpRR=6
@@ -12,6 +14,8 @@ InpStructuralBuffer=0.30
 InpRequireSlBeyondRb=true
 InpRiskPct=0.25
 InpDailyLossPct=1.0
+; daily limit = % of the initial balance (EA default, Ash Turbo rule base)
+InpDailyOnInitial=true
 InpMaxOpenRiskPct=0.5
 InpMaxTradesPerDay=3
 InpMaxPositions=1
@@ -20,8 +24,8 @@ InpOrderExpiryBars=8
 InpSlippageTicks=10
 InpNewsFilter=true
 InpJournal=true
-; SET the broker round-turn commission per lot before running (0 = ignored in lot sizing)
-InpCommissionPerLotRT=0.0
+; Upcomers Ash Turbo: 5 $/lot round turn (confirmed from the account, 2026-10-25)
+InpCommissionPerLotRT=5.0
 ; Regime: classify and log only (source baseline) - every regime traded at full risk
 InpRegimeEnabled=true
 InpTradeHighVol=true
@@ -40,3 +44,5 @@ InpProfitTargetPct=0
 InpMaxTradingDays=0
 InpChallengeDays=0
 InpTrailingDD=false
+; tester server clock: -99 = UTC+2 winter / UTC+3 US DST; custom symbols built from UTC data: set 0
+InpServerUtcOffset=-99

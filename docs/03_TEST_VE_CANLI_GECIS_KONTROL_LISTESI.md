@@ -62,7 +62,7 @@ Her kutu kanıtla (rapor dosyası, log, ekran görüntüsü) işaretlenir. Bir m
 
 - [ ] Firma EA/otomasyon kullanımına izin veriyor (yazılı kaynak)
 - [ ] Firma kuralları son 30 gün içinde tekrar kontrol edildi; `InpPropRulesVerified=true`
-- [ ] Kullanıcı açık yazılı onay verdi; `InpAllowLiveTrading=true` ve `InpLiveConfirmLogin=<hesap no>` ayarlandı
+- [ ] Kullanıcı açık yazılı onay verdi; `InpAllowLiveTrading=true` ayarlandı (`InpLiveConfirmLogin=<hesap no>` demo ve prop challenge dahil her hesapta zaten gerekli)
 - [ ] İlk 2 hafta risk %0.10–0.125 (yarım risk), sonra kademeli %0.25
 - [ ] Günlük izleme: journal, açık risk, günlük worst-case, DD
 - [ ] Durdurma kuralları yazılı: canlı expectancy demo'dan anlamlı sapma, art arda X kayıp, firma limitinin %50'sine yaklaşma → sistem kapatılır, inceleme

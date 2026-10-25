@@ -956,7 +956,14 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
       g_log.Log("SIGNAL_DUPLICATE", id, ctx, "already processed");
       return;
      }
-   g_meta.MarkProcessed(id);   // one attempt per signal, also when rejected below
+   //--- atomic claim first: of several instances (same account/symbol/magic) only one proceeds
+   if(!g_meta.Claim(id))
+     {
+      g_log.Log("SIGNAL_DUPLICATE", id, ctx, "claimed by another EA instance (or claim failed, err=" +
+                IntegerToString(GetLastError()) + ")");
+      return;
+     }
+   g_meta.MarkProcessed(id);   // one attempt per signal, also when rejected below (flushed)
    //--- volatility / range regime at the confirming (closed) bar
    RBRegime reg;
    RB_ClassifyRegime(series, sig.confirm_idx, g_reg, reg);
@@ -1018,12 +1025,20 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    string pctx = StringFormat("entry=%s sl=%s tp=%s risk_dist=%s (%s points) rr=%.1f fib=%.2f",
                               DoubleToString(plan.entry, _Digits), DoubleToString(plan.sl, _Digits),
                               DoubleToString(plan.tp, _Digits), DoubleToString(plan.risk_dist, _Digits),
-                              DoubleToString(plan.risk_dist / g_spec.point, 1), InpRR, plan.fib_level);
+                              DoubleToString(plan.risk_dist / g_spec.point, 1), cfg.rr, plan.fib_level);
    r = RB_CheckMarket(plan, g_cfg, g_spec, tick.bid, tick.ask);
    if(r != 0)
      {
       g_log.Log("SIGNAL_REJECTED", id, pctx + StringFormat(" bid=%s ask=%s", DoubleToString(tick.bid, _Digits),
                 DoubleToString(tick.ask, _Digits)), RB_ReasonText(r));
+      return;
+     }
+   //--- restart / late evaluation: the running bar already reached the target -> setup is spent
+   double h0 = iHigh(_Symbol, TF, 0), l0 = iLow(_Symbol, TF, 0);
+   if((plan.dir == RB_DIR_BULL && h0 > 0.0 && h0 >= plan.tp) || (plan.dir == RB_DIR_BEAR && l0 > 0.0 && l0 <= plan.tp))
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + StringFormat(" bar0 high=%s low=%s", DoubleToString(h0, _Digits),
+                DoubleToString(l0, _Digits)), "TP_TOUCHED_CURRENT_BAR (target reached before the order could be placed)");
       return;
      }
 
@@ -1081,22 +1096,23 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    //--- account-wide guard
    RBRiskSnapshot snap;
    string err;
-   if(!RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, ServerOffsetSec(), snap, err))
+   if(!RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, InpSlippageTicks, g_day_ref, ServerOffsetSec(), snap, err))
      {
       g_log.Log("SIGNAL_REJECTED", id, pctx, "SNAPSHOT_FAILED " + err);
       return;
      }
    int g = RB_CheckNewOrder(g_lim, snap, trade_risk);
-   string gctx = StringFormat(" lots=%.2f risk=%.2f realized=%.2f open=%.2f pending=%.2f day_ref=%.2f",
-                              lots, trade_risk, snap.realized_today, snap.open_risk, snap.pending_risk, snap.day_start_ref);
+   string gctx = StringFormat(" lots=%.2f risk=%.2f realized=%.2f open=%.2f open_now=%.2f pending=%.2f day_ref=%.2f daily_limit=%.2f",
+                              lots, trade_risk, snap.realized_today, snap.open_risk, snap.open_risk_now, snap.pending_risk,
+                              snap.day_start_ref, RB_DailyLimitMoney(g_lim, snap));
    if(g != 0)
      {
       g_log.Log("SIGNAL_REJECTED", id, pctx + gctx, RB_GuardText(g));
       return;
      }
 
-   //--- send. Server-side expiry when the symbol supports it.
-   ENUM_ORDER_TYPE_TIME tt = ORDER_TIME_GTC;
+   //--- expiry: server-side when the symbol supports it, else GTC / DAY as allowed (EA-side expiry)
+   ENUM_ORDER_TYPE_TIME tt;
    datetime exp = 0;
    int exp_modes = (int)SymbolInfoInteger(_Symbol, SYMBOL_EXPIRATION_MODE);
    if((exp_modes & SYMBOL_EXPIRATION_SPECIFIED) != 0 && InpOrderExpiryBars > 0)
@@ -1104,9 +1120,34 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
       tt  = ORDER_TIME_SPECIFIED;
       exp = sig.confirm_time + PeriodSeconds(TF) * (InpOrderExpiryBars + 1);
      }
+   else if((exp_modes & SYMBOL_EXPIRATION_GTC) != 0)
+      tt = ORDER_TIME_GTC;
+   else if((exp_modes & SYMBOL_EXPIRATION_DAY) != 0)
+      tt = ORDER_TIME_DAY;
+   else
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx, "NO_EXPIRATION_MODE expiration_mode=" + IntegerToString(exp_modes));
+      return;
+     }
+
+   //--- account gate again right before sending (login / connection / mode may have changed)
+   int perm = TradingPermission();
+   if(perm != 0)
+     {
+      g_log.Log("SIGNAL_REJECTED", id, pctx + gctx, "PERMISSION " + RB_PermissionText(perm));
+      return;
+     }
+
+   //--- send: prices on the symbol grid; RETURN filling for pending limits where allowed
+   double entry = NormalizeDouble(plan.entry, _Digits);
+   double sl    = NormalizeDouble(plan.sl, _Digits);
+   double tp    = NormalizeDouble(plan.tp, _Digits);
+   if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_EXEMODE) != SYMBOL_TRADE_EXECUTION_MARKET)
+      g_trade.SetTypeFilling(ORDER_FILLING_RETURN);
    bool sent = (plan.dir == RB_DIR_BULL)
-               ? g_trade.BuyLimit(lots, plan.entry, _Symbol, plan.sl, plan.tp, tt, exp, id)
-               : g_trade.SellLimit(lots, plan.entry, _Symbol, plan.sl, plan.tp, tt, exp, id);
+               ? g_trade.BuyLimit(lots, entry, _Symbol, sl, tp, tt, exp, id)
+               : g_trade.SellLimit(lots, entry, _Symbol, sl, tp, tt, exp, id);
+   g_trade.SetTypeFillingBySymbol(_Symbol);   // back to the market-order filling for PositionClose
    uint rc = g_trade.ResultRetcode();
    ulong ticket = g_trade.ResultOrder();
    if(!sent || (rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_PLACED) || ticket == 0)
@@ -1115,9 +1156,9 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
       return;
      }
    g_meta.Set(ticket, "dir", plan.dir);
-   g_meta.Set(ticket, "entry", plan.entry);
-   g_meta.Set(ticket, "sl", plan.sl);
-   g_meta.Set(ticket, "tp", plan.tp);
+   g_meta.Set(ticket, "entry", entry);
+   g_meta.Set(ticket, "sl", sl);
+   g_meta.Set(ticket, "tp", tp);
    g_meta.Set(ticket, "rbl", sig.rb_low);
    g_meta.Set(ticket, "rbh", sig.rb_high);
    g_meta.Set(ticket, "zt", sig.zone_top);
@@ -1144,9 +1185,11 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
    g_meta.Set(ticket, "mae", 0.0);
    for(int d = 0; d < RB_FEAT_DIMS; d++)
       g_meta.Set(ticket, "f" + IntegerToString(d), feat.b[d]);
+   g_meta.Flush();
    // order SENT is logged here; the FILL is logged separately from OnTradeTransaction
    g_log.Log("ORDER_SENT", id, pctx + gctx + " ticket=" + IntegerToString((long)ticket) +
-             (tt == ORDER_TIME_SPECIFIED ? " expires=" + TimeToString(exp) : " GTC (EA-side expiry)"), "OK");
+             (tt == ORDER_TIME_SPECIFIED ? " expires=" + TimeToString(exp) :
+              tt == ORDER_TIME_DAY ? " DAY (EA-side expiry)" : " GTC (EA-side expiry, cancelled on EA removal)"), "OK");
   }
 
 //+------------------------------------------------------------------+
@@ -1166,6 +1209,7 @@ void OnNewBar(void)
    //--- pending order maintenance always runs on closed bars
    ManagePendingOnBar(rates, n);
    Reconcile("BAR");
+   SweepClosed("BAR");
    CheckInactivity();
    CheckChallenge();
    UpdateHighWaterMark();
@@ -1173,15 +1217,17 @@ void OnNewBar(void)
    //--- day limit: existing exposure already at the limit -> cancel pending, block the day
    RBRiskSnapshot snap;
    string err;
-   if(RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, g_day_ref, ServerOffsetSec(), snap, err))
+   if(RB_BuildSnapshot(InpMagic, InpCommissionPerLotRT, InpSlippageTicks, g_day_ref, ServerOffsetSec(), snap, err))
      {
-      double day_pnl = snap.realized_today + (snap.equity - snap.balance);
-      if(RB_DailyLimitBreached(g_lim, snap, day_pnl))
+      if(RB_DailyLimitBreached(g_lim, snap))
         {
          CancelAllPending("DAILY_LOSS_LIMIT");
-         BlockToday(StringFormat("day_pnl=%.2f limit=%.2f", day_pnl, g_lim.daily_loss_pct * g_day_ref));
+         BlockToday(StringFormat("equity=%.2f day_ref=%.2f equity-day_ref=%.2f limit=%.2f", snap.equity, snap.day_start_ref,
+                                 snap.equity - snap.day_start_ref, RB_DailyLimitMoney(g_lim, snap)));
         }
      }
+   else
+      g_log.Log("SNAPSHOT_FAILED", "", err, "daily-limit check skipped this bar; new orders are refused");
    string why;
    if(InpFridayCutoffHour >= 0 && TimeBlocked(why) && StringFind(why, "FRIDAY") == 0)
       CancelAllPending("FRIDAY_CUTOFF");
@@ -1220,7 +1266,12 @@ void OnNewBar(void)
 void OnTick(void)
   {
    if(!g_ready)
-      return;
+     {
+      if(g_wait_account)
+         TryAccountInit();
+      if(!g_ready)
+         return;
+     }
    if(!g_tester && !(bool)TerminalInfoInteger(TERMINAL_CONNECTED))
      {
       if(!g_halted)
@@ -1244,6 +1295,18 @@ void OnTick(void)
       UpdateHighWaterMark();
      }
 
+   //--- news window: cancel own pending orders (calendar read at most once per 60 s)
+   if(InpNewsFilter && !g_tester && GetTickCount64() - g_news_ms >= 60000)
+     {
+      g_news_ms = GetTickCount64();
+      if(OwnPendingCount() > 0)
+        {
+         string ev;
+         if(RB_NewsBlocked(InpNewsCurrency, InpNewsMinutesBefore, InpNewsMinutesAfter, ev))
+            CancelAllPending("NEWS " + ev);
+        }
+     }
+
    datetime t = iTime(_Symbol, TF, 0);
    if(t == 0 || t == g_last_bar)
       return;
@@ -1252,61 +1315,58 @@ void OnTick(void)
   }
 
 //+------------------------------------------------------------------+
-//| Fills and closes, from broker deals                              |
+//| Closed-trade accounting. Called from OnTradeTransaction and from |
+//| the sweep (OnInit, every new bar) so manual closes, stop-outs and|
+//| closes while the EA was off are booked exactly once (metadata is |
+//| deleted afterwards). order_gone: caller knows the order is gone. |
+//| Returns true when the position was booked.                       |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+bool ProcessClosedPosition(ulong pos, bool order_gone = false)
   {
-   if(trans.type == TRADE_TRANSACTION_HISTORY_ADD &&
-      (trans.order_state == ORDER_STATE_CANCELED || trans.order_state == ORDER_STATE_EXPIRED ||
-       trans.order_state == ORDER_STATE_REJECTED) && g_meta.Has(trans.order))
-     {
-      g_log.Log(trans.order_state == ORDER_STATE_EXPIRED ? "ORDER_EXPIRED" : "ORDER_CLOSED_UNFILLED",
-                "", "ticket " + IntegerToString((long)trans.order), EnumToString(trans.order_state));
-      g_meta.Delete(trans.order);
-      return;
-     }
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0)
-      return;
-   if(!HistoryDealSelect(trans.deal))
-      return;
-   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic || HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol)
-      return;
-   long entry  = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-   ulong pos   = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-   double px   = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
-   string id   = RB_SignalId((int)g_meta.Get(pos, "dir"), (datetime)g_meta.Get(pos, "rbt"));
-   if(entry == DEAL_ENTRY_IN)
-     {
-      double planned = g_meta.Get(pos, "entry");
-      g_log.Log("FILLED", id, StringFormat("position %I64u price=%s planned=%s slippage=%s vol=%.2f", pos,
-                DoubleToString(px, _Digits), DoubleToString(planned, _Digits),
-                DoubleToString(px - planned, _Digits), HistoryDealGetDouble(trans.deal, DEAL_VOLUME)), "OK");
-      return;
-     }
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
-      return;
-   if(PositionSelectByTicket(pos))
-      return;   // partially closed, wait for the final deal
-
-   //--- position fully closed: net result from broker deals of this position
+   if(!g_meta.Has(pos) || PositionExistsById(pos))
+      return false;
+   if(!order_gone && OrderPending(pos))
+      return false;   // remainder of a partially filled order still pending: book later
    if(!HistorySelectByPosition(pos))
-      return;
-   double net = 0.0, fill = 0.0, vol = 0.0;
+      return false;
+   double net = 0.0, in_vol = 0.0, out_vol = 0.0, in_px = 0.0, out_px = 0.0;
    datetime t_open = 0, t_close = 0;
+   long last_reason = -1;
    for(int i = 0; i < HistoryDealsTotal(); i++)
      {
       ulong d = HistoryDealGetTicket(i);
+      if(d == 0)
+         continue;
+      long   e = HistoryDealGetInteger(d, DEAL_ENTRY);
+      double v = HistoryDealGetDouble(d, DEAL_VOLUME);
+      double p = HistoryDealGetDouble(d, DEAL_PRICE);
+      datetime dt = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
       net += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_COMMISSION) +
              HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_FEE);
-      if(HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_IN)
+      if(e == DEAL_ENTRY_IN)
         {
-         fill   = HistoryDealGetDouble(d, DEAL_PRICE);
-         vol   += HistoryDealGetDouble(d, DEAL_VOLUME);
-         t_open = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+         in_vol += v;
+         in_px  += p * v;
+         if(t_open == 0 || dt < t_open)
+            t_open = dt;
         }
-      else
-         t_close = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+      else if(e == DEAL_ENTRY_OUT || e == DEAL_ENTRY_OUT_BY || e == DEAL_ENTRY_INOUT)
+        {
+         out_vol += v;
+         out_px  += p * v;
+         if(dt >= t_close)
+           {
+            t_close     = dt;
+            last_reason = HistoryDealGetInteger(d, DEAL_REASON);
+           }
+        }
      }
+   if(!(in_vol > 0.0) || out_vol < in_vol - 1e-8)
+      return false;   // never filled, or not fully closed yet
+   double fill = in_px / in_vol;      // volume-weighted entry
+   double px   = out_px / out_vol;    // volume-weighted exit
+
+   string id   = RB_SignalId((int)g_meta.Get(pos, "dir"), (datetime)g_meta.Get(pos, "rbt"));
    double risk = g_meta.Get(pos, "risk");
    double rr   = risk > 0.0 ? net / risk : 0.0;
    int dir     = (int)g_meta.Get(pos, "dir");
@@ -1321,7 +1381,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    row.fill_price      = fill;
    row.sl              = g_meta.Get(pos, "sl");
    row.tp              = g_meta.Get(pos, "tp");
-   row.volume          = vol;
+   row.volume          = in_vol;
    row.risk_money      = risk;
    row.net             = net;
    row.r               = rr;
@@ -1336,7 +1396,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    row.vol_ratio       = g_meta.Get(pos, "vr");
    row.er              = g_meta.Get(pos, "er");
    row.risk_mult       = g_meta.Get(pos, "rmul");
-   row.exit_reason     = ExitReasonText(HistoryDealGetInteger(trans.deal, DEAL_REASON));
+   row.exit_reason     = ExitReasonText(last_reason);
    row.mfe_r           = rdist > 0.0 ? g_meta.Get(pos, "mfe") / rdist : 0.0;
    row.mae_r           = rdist > 0.0 ? g_meta.Get(pos, "mae") / rdist : 0.0;
    row.zones_hit       = (int)g_meta.Get(pos, "zh");
@@ -1351,8 +1411,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    //--- outcome explanation: what happened and under which conditions
    RBFeatures feat;
    ZeroMemory(feat);
-   for(int d = 0; d < RB_FEAT_DIMS; d++)
-      feat.b[d] = (int)g_meta.Get(pos, "f" + IntegerToString(d));
+   for(int d = 0; d < RB_FEAT_DIMS; d++)   // clamp: a damaged global variable must not index out of range
+      feat.b[d] = (int)MathMax(0, MathMin(RB_FEAT_BUCKETS - 1, (int)g_meta.Get(pos, "f" + IntegerToString(d))));
    string cond = "";
    for(int d = 0; d < RB_FEAT_DIMS; d++)
       cond += (d > 0 ? (string)" " : (string)"") + RB_DimText(d) + "=" + RB_BucketText(d, feat.b[d]);
@@ -1362,7 +1422,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                                outcome, rr, row.exit_reason, row.mfe_r, row.mae_r, cond, row.zones_hit,
                                row.wick_ratio * 100.0, row.rb_range_atr, row.stop_atr, row.fill_delay_bars,
                                row.risk_pct * 100.0, row.scale_reason, row.edge_mult, row.risk_mult);
-   g_log.Log("CLOSED", id, StringFormat("position %I64u exit=%s net=%.2f risk=%.2f", pos,
+   g_log.Log("CLOSED", id, StringFormat("position %I64u exit=%s (vol-weighted) net=%.2f risk=%.2f", pos,
              DoubleToString(px, _Digits), net, risk), story);
    g_log.Trade(row);
 
@@ -1372,7 +1432,78 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    GvSet("consec_losses", net < 0.0 ? GvGet("consec_losses", 0.0) + 1.0 : 0.0);
    GvSet("last_close", (double)TimeCurrent());
    UpdateHighWaterMark();
-   g_meta.Delete(pos);
+   g_meta.Delete(pos);   // flushes
+   return true;
+  }
+
+//--- metadata whose order and position are gone: book the closed trade, or drop the record
+//--- of an order that ended unfilled (cancelled / expired / rejected while the EA was off)
+void SweepClosed(const string when)
+  {
+   ulong tickets[];
+   int n = g_meta.Tickets(tickets);
+   for(int i = 0; i < n; i++)
+     {
+      ulong t = tickets[i];
+      if(PositionExistsById(t) || OrderPending(t))
+         continue;
+      if(ProcessClosedPosition(t))
+        {
+         g_log.Log("SWEEP_BOOKED", "", when + " position " + IntegerToString((long)t), "closed trade booked from history");
+         continue;
+        }
+      //--- no fill in history: drop only when the order is in history with a final state
+      if(!HistoryOrderSelect(t))
+         continue;
+      long st = HistoryOrderGetInteger(t, ORDER_STATE);
+      if(st == ORDER_STATE_CANCELED || st == ORDER_STATE_EXPIRED || st == ORDER_STATE_REJECTED)
+        {
+         g_log.Log("SWEEP_CLEANUP", HistoryOrderGetString(t, ORDER_COMMENT), when + " order " + IntegerToString((long)t),
+                   "ended unfilled (" + EnumToString((ENUM_ORDER_STATE)st) + "): metadata removed");
+         g_meta.Delete(t);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Fills and closes, from broker deals. Our trades are recognised   |
+//| by their metadata (POSITION_ID), not by DEAL_MAGIC: manual and   |
+//| stop-out closes carry magic 0.                                   |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+  {
+   if(g_prefix == "")
+      return;   // account init not done yet
+   if(trans.type == TRADE_TRANSACTION_HISTORY_ADD &&
+      (trans.order_state == ORDER_STATE_CANCELED || trans.order_state == ORDER_STATE_EXPIRED ||
+       trans.order_state == ORDER_STATE_REJECTED) && g_meta.Has(trans.order))
+     {
+      g_log.Log(trans.order_state == ORDER_STATE_EXPIRED ? "ORDER_EXPIRED" : "ORDER_CLOSED_UNFILLED",
+                "", "ticket " + IntegerToString((long)trans.order), EnumToString(trans.order_state));
+      ReleaseOrderMeta(trans.order);   // keeps the record while a partial-fill position exists
+      return;
+     }
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0)
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   ulong pos = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+   if(!g_meta.Has(pos))
+      return;
+   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry == DEAL_ENTRY_IN)
+     {
+      double px      = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      double planned = g_meta.Get(pos, "entry");
+      string id      = RB_SignalId((int)g_meta.Get(pos, "dir"), (datetime)g_meta.Get(pos, "rbt"));
+      g_log.Log("FILLED", id, StringFormat("position %I64u price=%s planned=%s slippage=%s vol=%.2f", pos,
+                DoubleToString(px, _Digits), DoubleToString(planned, _Digits),
+                DoubleToString(px - planned, _Digits), HistoryDealGetDouble(trans.deal, DEAL_VOLUME)), "OK");
+      return;
+     }
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY && entry != DEAL_ENTRY_INOUT)
+      return;
+   ProcessClosedPosition(pos);   // no-op while partially closed or the order remainder is pending
   }
 
 //+------------------------------------------------------------------+

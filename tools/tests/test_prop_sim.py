@@ -50,11 +50,17 @@ def test_trailing_floor_follows_peak():
     assert out.trading_days <= 8
 
 
-def test_inactivity():
-    days = days_from([[]] * 30)
+def test_inactivity_uses_real_dates():
+    # 35 calendar days without a closed trade (real dates, not list entries)
+    days = days_from([[]] * 40)
     out = ps.attempt(it(days), ps.PROGRAMS["phoenix"], 0.005)
     assert out.reason == "inactivity"
-    assert out.trading_days == 25  # 25 trading days * 7/5 = 35 calendar days
+    assert out.trading_days == 35
+    # sparse history: only weekday rows -> still fails on the 35th calendar day, after fewer entries
+    d0 = date(2024, 1, 1)
+    weekdays = [ps.Day(d0 + timedelta(days=i)) for i in range(60) if (d0 + timedelta(days=i)).weekday() < 5]
+    out = ps.attempt(it(weekdays), ps.PROGRAMS["phoenix"], 0.005)
+    assert out.reason == "inactivity" and out.trading_days == 25
 
 
 def test_report_runs():
@@ -85,30 +91,43 @@ def test_ash_two_percent_target():
 
 
 def test_time_limit_fails_slow_attempts():
-    # +1R per day at 0.25% risk needs 8 trading days for 2%; a 7-calendar-day limit (5 trading days) fails
+    # +1R per day at 0.25% risk needs 8 days for 2%; a 7-calendar-day limit fails after 7 days
     prog = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 7)
     out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.0025)
-    assert not out.passed and out.reason == "timeout" and out.trading_days == 5
+    assert not out.passed and out.reason == "timeout" and out.trading_days == 7
     prog2 = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 14)
     out2 = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog2, 0.0025)
     assert out2.passed and out2.trading_days == 8
 
 
+def test_calendar_limit_counts_weekend_gaps():
+    # Sunday-evening rows and weekend gaps: a 7-calendar-day limit ends on the date, not after 7 rows
+    prog = ps.Program("turbo-like", (0.02,), 0.03, 0.06, True, 35, 7)
+    d0 = date(2024, 1, 1)  # Monday
+    rows = [ps.Day(d0 + timedelta(days=i), [(1.0, -0.2)]) for i in (0, 1, 2, 3, 4, 6, 7, 8)]  # Sun 7th, Mon 8th...
+    out = ps.attempt(iter(rows), prog, 0.0025)
+    assert out.reason == "timeout" and out.trading_days == 6 and out.calendar_days == 7
+
+
 def test_ash_turbo_seven_trading_days():
     prog = ps.PROGRAMS["ash_turbo"]
-    assert prog.max_active_days == 7 and prog.time_limit_trading_days == 21 and prog.targets == (0.02,)
+    assert prog.max_active_days == 7 and prog.time_limit_days == 30 and prog.targets == (0.02,)
     # +1R per traded day at 0.25%: 2% needs 8 traded days -> fails after the 7th traded day
     out = ps.attempt(it(days_from([[(1.0, -0.2)]] * 20)), prog, 0.0025)
-    assert out.reason == "timeout" and out.trading_days == 7
-    # days without a closed trade do not use up the 7 trading days (only the 21-weekday limit)
+    assert out.reason == "timeout" and out.trading_days == 7 and out.active_days == 7
+    # days without a closed trade do not use up the 7 trading days (only the 30-calendar-day limit)
     mixed = []
     for _ in range(10):
         mixed += [[(1.0, -0.2)], []]
     out = ps.attempt(it(days_from(mixed)), prog, 0.003)
-    assert out.passed and out.trading_days == 13
+    assert out.passed and out.trading_days == 13 and out.active_days == 7
     # strict reading: 7 weekdays in total -> the same sequence fails
     out = ps.attempt(it(days_from(mixed)), ps.PROGRAMS["ash_turbo_strict"], 0.003)
     assert out.reason == "timeout"
+    # 30 calendar days: one +1R trade every 5 days at 0.25% never gets there
+    sparse = [[(1.0, -0.2)] if i % 5 == 0 else [] for i in range(40)]
+    out = ps.attempt(it(days_from(sparse)), prog, 0.0025)
+    assert out.reason == "timeout" and out.calendar_days == 30
 
 
 def test_turbo_daily_limit_is_fixed_amount():
@@ -116,5 +135,62 @@ def test_turbo_daily_limit_is_fixed_amount():
     # breaches the fixed 3 000 $ limit, but would NOT breach 3% of the 101.4k day reference (3 042 $)
     days = days_from([[(1.4, 0.0)], [(-1.0, -3.0)]])
     assert ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01).reason == "daily"
-    relative = ps.Program("relative", (0.02,), 0.03, 0.06, True, 35, 0, 21, 7, False)
+    relative = ps.Program("relative", (0.02,), 0.03, 0.06, True, 35, 30, 0, 7, False)
     assert ps.attempt(it(days), relative, 0.01).reason != "daily"
+
+
+def test_shield_follows_intraday_equity_peak():
+    # audit probe: at 1% risk the trade first runs +5R (equity 105k -> shield 99k), then stops out
+    # at -1.05R (slippage): equity 98.95k < 99k -> max-loss breach. Closed-balance peak would miss it.
+    probe = [[(-1.05, -1.05, 5.0)]]
+    out = ps.attempt(it(days_from(probe)), ps.PROGRAMS["ash"], 0.01)
+    assert out.reason == "max_loss"
+    out = ps.attempt(it(days_from([[(-1.05, -1.05, 0.5)]])), ps.PROGRAMS["ash"], 0.01)
+    assert out.reason != "max_loss"
+    assert ps.attempt(it(days_from(probe)), ps.PROGRAMS["ash_turbo"], 0.01).reason == "max_loss"
+
+
+def test_size_multiplier_scales_risk():
+    # a regime x0.5 trade risks half: -3.2R at 1% x 0.5 = -1.6% -> no 3% daily breach
+    assert ps.attempt(it(days_from([[(1.0, -3.2, 1.0, 0.5)]])), ps.PROGRAMS["ash"], 0.01).reason != "daily"
+    assert ps.attempt(it(days_from([[(1.0, -3.2, 1.0, 1.0)]])), ps.PROGRAMS["ash"], 0.01).reason == "daily"
+
+
+def test_replay_censors_short_history():
+    # 10 days of +1R at 0.25%: starts with >= 8 days left pass, the rest run out of history
+    days = days_from([[(1.0, -0.2)]] * 10)
+    s = ps.summarize(ps.replay(days, ps.PROGRAMS["ash"], 0.0025))
+    starts = len(ps.replay_starts(days))
+    assert s["censored"] > 0 and s["n"] + s["censored"] == starts
+    assert s["passed"] == 1.0 and s["timeout"] == 0.0
+
+
+def test_block_bootstrap_keeps_consecutive_days_and_gaps():
+    import random
+    d0 = date(2024, 1, 1)
+    days = [ps.Day(d0 + timedelta(days=i), [(float(i), -0.1)]) for i in range(0, 30, 2)]  # every 2nd day
+    gen = ps.block_days(days, 5, random.Random(3))
+    sample = [next(gen) for _ in range(25)]
+    for k in range(0, 25, 5):
+        rs = [ps._trade(d.trades[0]).r for d in sample[k:k + 5]]
+        assert rs == [rs[0] + 2 * j for j in range(5)]          # consecutive history inside a block
+    gaps = {(b.day - a.day).days for a, b in zip(sample, sample[1:])}
+    assert gaps == {2}                                          # calendar gaps carried
+
+
+def test_load_days_reads_mfe_and_size(tmp_path):
+    t = tmp_path / "t.csv"
+    t.write_text("open_time;close_time;risk_money;net;r;mfe_r;mae_r;risk_pct\n"
+                 "2024.01.02 10:00;2024.01.02 12:00;250;-250;-1.0;2.5;-1.0;0.250\n"
+                 "2024.01.03 10:00;2024.01.03 12:00;124.69;748.14;6.0;6.0;-0.3;0.250\n")
+    days = ps.load_days(t, None, 100000.0)
+    a, b = days[0].trades[0], days[1].trades[0]
+    assert a.mfe == 2.5 and abs(a.size - 1.0) < 1e-9
+    assert abs(b.size - 0.5) < 1e-3          # 124.69 / (0.25% of 99 750) -> regime x0.5
+
+
+def test_report_caps_grid_and_validates():
+    days = days_from([[(6.0, -0.3)], [], [(-1.0, -1.0)], [(-1.0, -1.0)]] * 20)
+    text = ps.report(days, "ash_turbo", [0.0025, 0.0035, 0.01], runs=100, seed=1, validation=days)
+    assert "not simulated: 1.00%" in text and "| 1.000% |" not in text
+    assert "capped at 0.35%" in text and "NOT used for the decision" in text

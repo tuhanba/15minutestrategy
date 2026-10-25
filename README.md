@@ -102,23 +102,23 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 
 1. MT5'te **File → Open Data Folder**. Bu repodaki `MQL5/` klasörünün içeriğini açılan `MQL5/` klasörüne kopyala (Experts, Include, Scripts, Presets).
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
-3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=225 failed=0` ve `ALL PASSED` görünmeli.
+3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=234 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
    - `InpStopUnit` seçilmezse EA başlamaz. `PRICE` seçmek, "10" değerini 10.00 fiyat birimi kabul etmek demektir.
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
 5. Journal: `MQL5/Files/RBOTE/<sembol>_<magic>_<login>_journal.csv`. Tester'da: `Common/Files/RBOTE/tester_*`.
 
-Gerçek hesapta EA ancak şu üç girdi birlikte ayarlanırsa çalışır:
-- `InpAllowLiveTrading=true`
-- `InpLiveConfirmLogin=<hesap no>`
-- `InpPropRulesVerified=true`
-
-Aksi halde `INIT_REFUSED` verir. Contest hesapları her durumda reddedilir.
+Hesap kapısı (Strategy Tester dışında):
+- **Her hesapta** (demo ve prop challenge dahil; prop değerlendirme hesapları MT5'te genelde "demo" görünür)
+  `InpLiveConfirmLogin=<hesap no>` girilmeli, hesap bağlı ve giriş yapılmış olmalı. Giriş yapılmamışsa EA bekler (`INIT_WAIT`).
+- Gerçek hesapta ek olarak `InpAllowLiveTrading=true` ve `InpPropRulesVerified=true` gerekir.
+- Yalnız **hedging** hesaplar desteklenir (netting hesapta `HEDGING_ACCOUNT_REQUIRED`).
+- Kapı her emirden hemen önce yeniden kontrol edilir. Aksi halde `INIT_REFUSED`. Contest hesapları her durumda reddedilir.
 
 ## Testler
 
 ```bash
-make test                         # g++: ortak MQL5 testleri (225 kontrol)
+make test                         # g++: ortak MQL5 testleri (234 kontrol)
 python3 -m pytest -q tools/tests  # analiz aracı testleri
 ```
 

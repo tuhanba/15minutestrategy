@@ -24,32 +24,70 @@ hata görünür hale gelir. Ayrıca bu ortamda MT5 çalışmadığı için gerç
 | TP çıkışı | TP (boşlukta daha iyi açılış) |
 | Fill öncesi TP | dakika dolmadıysa ve TP görüldüyse iptal |
 | Yönetim stop değişikliği | bir sonraki dakikadan itibaren |
-| Komisyon | 6 $/lot gidiş-dönüş (Upcomers tutarı bulunamadı, 0 ve 10 ile hassasiyet) |
+| Komisyon | 5 $/lot gidiş-dönüş (kullanıcının Ash Turbo hesabı: 0.5 lot için 2.50 $, D-029); hassasiyet 0 ve 10 $ |
+| Swap | **varsayımsal** (D-026): long −45, short −15 $/lot/gece, Çarşamba gecesi ×3, 21:00 UTC rollover'da açık pozisyona (`--swap-long/--swap-short/--swap-hour`); hassasiyet: swap 0. Gerçek değer MT5 sembol özelliklerinden gelince güncellenecek |
+| Dönem sonu | açık pozisyon son fiyattan kapatılır, `exit_reason=END` (`--end-close on`) |
 | Gün / seans / cuma kesimi | UTC (Upcomers günlük DD 00:00 UTC) |
+| Kişisel limitler | günlük limit (`--daily`) stratejinin parçası, aktif. Toplam DD tabanı araştırmada **kapalı** (`--max-dd 0 --dd-trailing off`): ilk ihlalde donma örneklemi keserdi; yalnız ölçülür (D-025) |
+| Firma limitleri | backtest'te yalnız raporlanır (`--firm-daily`, `--firm-max`, ...); uygulanır hâli `tools/prop_sim.py`'dedir |
 
-## Araştırma planı (yönetici kararları D-004 … D-009, önceden kayıtlı)
+## Araştırma planı (önceden kayıtlı: D-004 … D-009, D-023 … D-029 ile güncel)
 
-`make research` → `reports/research.md`
+`make research` → `reports/research.md`. Seçim kuralları `tools/run_research.py` içinde kodludur.
 
-1. **A — varyantlar.**
-   - V0: sabit 10.00 fiyat stop, 6R
-   - V1: 5R
-   - V2: yapısal stop
+**Temel kural: seçim ve benimseme YALNIZ IS (2020-01-01 → 2023-12-31) ile yapılır. OOS (2024-01-01 → 2026-10-23)
+yalnız NİHAİ konfigürasyon için bir kez raporlanır ve seçimi değiştirmez (D-023).** Diğer adayların OOS satırları
+şeffaflık için ayrı bir tabloda "NOT used for selection" etiketiyle gösterilir. IS içinde walk-forward (18 ay eğitim /
+6 ay test pencereleri) yalnız kararlılık raporudur.
 
-   IS (2020–2023) içinde PF ≥ 1.30 olup expectancy'si en yüksek olan seçilir. OOS (2024 → bugün) bir kez raporlanır.
-2. **V3 / V4.** V3 = seçilen + rejim politikası, V4 = V3 + adaptif risk. Yalnız IS'i iyileştirip DD'yi kötüleştirmiyor ve OOS'u bozmuyorsa benimsenir.
-3. **D — işlem yönetimi.**
-   - M1: +2R'de başabaş
-   - M2: +3R'de başabaş
-   - M3: +3R'de yarısını kapat
-   - M4: +3R'den sonra 2R iz süren stop
+Her rapor hem R hem para cinsindendir. R (= net / işlem riski) pozisyon boyutunu görmez: rejim ×0.5 veya adaptif risk
+R expectancy'de ve sabit riskli R Monte Carlo'sunda görünmez. Para metrikleri (`analyze_trades.Summary`): net $ ve %,
+gerçek sıradan para max DD, ve **para Monte Carlo'su**: her işlemin gerçek P&L'i giriş anındaki bakiyenin oranı olarak
+(`net / bakiye_giriş` = `r × risk_money / bakiye_giriş`; `risk_pct` sütunu rejim çarpanını içermediği için tek başına
+kullanılmaz) iadeli yeniden örneklenir. Karar Monte Carlo'ları ≥ 5 000 koşu.
 
-   Benimseme şartları: IS'te en az +0.05R, DD kötüleşmiyor, OOS'ta M0'dan kötü değil.
-4. **Hassasiyet ızgarası** (yalnız rapor, seçimde kullanılmaz): stop 5/10/15, fib 0.705/0.79, fitil 0.4/0.5/0.6. İşaret değişiyorsa sonuç "FRAGILE" olarak işaretlenir.
-5. **C — Upcomers challenge simülasyonu** (`tools/prop_sim.py`): Phoenix 2-step ve Thunderbolt 1-step, risk %0.25–1.0.
-   - Monte Carlo: gün blokları, 10 000 deneme
-   - Tarihsel tekrar: her ay başından başlatılır
-   - Seçim: günlük ihlal olasılığı < %5 olan riskler içinde geçme olasılığı en yüksek olan.
+1. **A — varyantlar** (sabit %0.25 risk, IS): V0 sabit 10.00 fiyat stop 6R; V1 5R; V2 yapısal stop.
+   PF ≥ 1.30 olanlardan IS expectancy'si en yüksek seçilir.
+2. **B — V3 / V4** (boyutu değiştiren varyantlar, para bazlı, D-024): V3 = seçilen + rejim politikası;
+   V4 = (V3 benimsendiyse V3, değilse seçilen) + adaptif risk. Benimseme, referansa göre IS'te:
+   (net % / para MC max DD p95) ≥ %10 iyileşme **ve** para MC DD p95 ≤ 1.10 × referans **ve**
+   P(kişisel günlük limit ihlali, `daily.csv`'deki gün içi en düşük equity ile) artmıyor.
+3. **D — işlem yönetimi** (B'den çıkan konfigürasyon, sabit risk, IS): M1 +2R'de başabaş, M2 +3R'de başabaş,
+   M3 +3R'de yarısını kapat, M4 +3R'den sonra 2R iz süren stop. Benimseme: IS expectancy ≥ M0 + 0.05R ve para MC DD p95
+   M0'dan kötü değil. Birden fazla geçerse IS expectancy'si en yüksek olan.
+4. **NİHAİ konfigürasyon** = A + B + D kararları. Bunun için: IS/OOS tablosu, tam kabul raporu
+   (`analyze_trades.build_report`, IS/OOS ayrımıyla), komisyon 0/10 ve swap 0 hassasiyeti, yarıyıl kararlılığı,
+   kişisel %4 izleyen tabanın kırıldığı gün sayısı ve ilk tarih (yalnız ölçüm).
+5. **Hassasiyet ızgarası** (IS, yalnız rapor): stop 5/10/15, fib 0.705/0.79, fitil 0.4/0.5/0.6. İşaret değişiyorsa "FRAGILE".
+6. **C — Upcomers challenge simülasyonu** (`tools/prop_sim.py`), NİHAİ konfigürasyonun **sabit riskli** backtest'i
+   üzerinde (adaptif kapalı, kişisel günlük %2 = Turbo ön ayarı). Birincil program **Ash Turbo 100k**; Ash Turbo
+   (katı okuma: 7 hafta içi gün), Ash, Phoenix, Thunderbolt karşılaştırma.
+   - Risk ızgarası %0.25 / 0.30 / 0.35 / 0.40 / 0.50 (D-027). Ön ayar tavanı (`InpMaxRiskPct` %0.5, açık risk %0.5)
+     üstü yalnız `--allow-above-cap` ile.
+   - **Karar bir kez, IS işlemleriyle**: P(günlük ihlal) < %5 **ve** P(max-loss/shield ihlali) < %10 olanlar içinde
+     Monte Carlo geçme olasılığı en yüksek risk; eşitlikte düşük risk. Ayrıca aynı kural **%0.35 tavanlı** (Upcomers
+     tek kazançla geçmeye yazılı onay verene kadar kullanılacak risk). OOS işlemleri yalnız doğrulama olarak gösterilir.
+   - EA'nın kişisel günlük (%2) ve izleyen (%4) limitlerine değme olasılıkları ek kısıt olarak raporlanır.
+
+### prop_sim modeli
+
+- Boyut: `risk_money = risk × bakiye × size_mult`, P&L = `r × risk_money`. `size_mult` = backtest işleminin
+  `risk_money / (risk_pct/100 × giriş bakiyesi)`: rejim ×0.5 ve lot yuvarlamasını taşır. Yaklaşım: backtest
+  min(balance, equity) ile ve kendi riskinde lot yuvarladı; oran simüle bakiyeye doğrusal ölçeklenir.
+- Günlük limit: gün başı bakiye (00:00 UTC'de pozisyon yok varsayımı) − limit; gün içi dip = bakiye + `mae_r × risk_money`.
+- Dynamic Risk Shield **equity tepesini** izler: her işlemde önce tepe `bakiye + mfe_r × risk_money`'ye çekilir, sonra
+  ters hareket / stop uygulanır (muhafazakâr sıra, D-028). Ash Turbo'da kilit yok (belirtilmemiş).
+- Süreler gerçek tarihlerle: takvim limiti `tarih ≥ başlangıç + N gün` olunca biter (hafta sonu/tatil dahil);
+  hareketsizlik = son kapanıştan 35 takvim günü; Ash Turbo 7 işlem günü = en az bir işlemin kapandığı gün sayısı.
+- Monte Carlo: **ardışık günlerden kayan blok bootstrap** (varsayılan 5 gün = bir işlem haftası, `--block`), 10 000
+  deneme; her günün gerçek takvim boşluğu korunur.
+- Tarihsel tekrar: her hafta içi günden (veya `--replay-step month`) başlatılır; geçmişi yetmeyen başlangıçlar
+  **sansürlenir** (ayrı sayılır, oranlara girmez), timeout sayılmaz.
+
+### Önbellek
+
+`reports/runs/<tag>.key`: backtester ikilisinin SHA-256'sı + tam argüman listesi + veri dosyalarının yol/boyut/mtime
+bilgisinin hash'i. Anahtar tutmazsa koşu yeniden yapılır.
 
 Sonuçlar kabul kriterlerini geçmezse strateji **doğrulanmamış** sayılır. Kriterler sonuca bakılarak gevşetilmez.
 

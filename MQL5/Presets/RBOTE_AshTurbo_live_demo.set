@@ -4,7 +4,11 @@
 ; Risk per trade stays 0.25% until the challenge simulation picks a value (manager D-022: <= 0.35%
 ; unless Upcomers confirms that passing with a single win is allowed).
 ; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source "Stop: 10.00" as 10.00 price units.
+; Account confirmed 2026-10-25: XAUUSD digits 2, point 0.01 (10.00 price = 1000 points).
 InpAllowLiveTrading=false
+; REQUIRED outside the Strategy Tester on EVERY account (demo / prop evaluation too):
+; set InpLiveConfirmLogin to this account's login number, otherwise the EA refuses to start.
+InpLiveConfirmLogin=0
 InpMagic=7915790
 InpFibLevel=0.79
 InpRR=6
@@ -14,6 +18,8 @@ InpStopUnit=0
 InpRiskPct=0.25
 InpMaxRiskPct=0.5
 InpDailyLossPct=2.0
+; daily limit = 2% of the INITIAL balance (firm rule base: 3% of initial)
+InpDailyOnInitial=true
 InpMaxOpenRiskPct=0.5
 InpMaxTotalDDPct=4.0
 InpTrailingDD=true
@@ -21,6 +27,7 @@ InpMaxTradesPerDay=3
 InpMaxPositions=1
 InpMaxPending=1
 InpMaxLots=50
+; challenge rules ON (EA defaults are 0 = off)
 InpProfitTargetPct=2.0
 InpMaxTradingDays=7
 InpChallengeDays=30
@@ -29,5 +36,5 @@ InpEdgeEnabled=false
 InpRegimeEnabled=true
 InpNewsFilter=true
 InpJournal=true
-; SET the broker round-turn commission per lot (unknown for Upcomers; check XAUUSD Specification)
-InpCommissionPerLotRT=0.0
+; Upcomers Ash Turbo: 5 $/lot round turn (confirmed from the account, 2026-10-25)
+InpCommissionPerLotRT=5.0

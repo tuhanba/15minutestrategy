@@ -113,3 +113,25 @@ def test_why_section(tmp_path):
     assert "| OB (small) | 2 | 0.0% | -1.000 |" in lines
     assert "reached +3R first: 50.0%" in lines
     assert "same trades at flat 0.25% of start balance: 2,500.00" in lines
+
+
+def test_money_fractions_see_position_size(tmp_path):
+    # same R sequence, second run trades the loser at half size (regime x0.5): R metrics identical,
+    # money metrics differ
+    full, half = tmp_path / "full.csv", tmp_path / "half.csv"
+    write_csv(full, [("2024.01.02", -1000, 1000, 1.0), ("2024.01.03", 6000, 1000, 1.0)])
+    write_csv(half, [("2024.01.02", -500, 500, 1.0), ("2024.01.03", 6000, 1000, 1.0)])
+    a = at.summarize(at.load_trades(full), 0.01, 100000.0, 0.02, runs=500)
+    b = at.summarize(at.load_trades(half), 0.01, 100000.0, 0.02, runs=500)
+    assert math.isclose(a.expectancy_r, b.expectancy_r)
+    assert math.isclose(a.return_frac, 0.05) and math.isclose(b.return_frac, 0.055)
+    fr = at.money_fractions(at.load_trades(half), 100000.0)
+    assert math.isclose(fr[0], -0.005) and math.isclose(fr[1], 6000 / 99500)
+    assert b.money_mc["p95"] < a.money_mc["p95"]
+    assert b.return_to_dd > a.return_to_dd
+
+
+def test_money_monte_carlo_deterministic_single_value():
+    mc = at.money_monte_carlo([-0.01] * 3, runs=50, seed=1)
+    assert math.isclose(mc["p95"], 1 - 0.99 ** 3)
+    assert math.isclose(mc["ret_p50"], 0.99 ** 3 - 1)
