@@ -59,6 +59,7 @@ class Trade:
     risk_pct: float = 0.0
     edge_mult: float = 1.0
     scale_reason: str = ""
+    strategy: str = "RBOTE"
 
 
 def _parse_time(text: str) -> datetime:
@@ -69,6 +70,15 @@ def _parse_time(text: str) -> datetime:
         except ValueError:
             continue
     raise ValueError(f"unrecognized time: {text!r}")
+
+
+def _strategy_of(row: dict) -> str:
+    """Strategy tag: explicit 'strategy' column, else the signal_id prefix (RBOTE|B|..., DTBS|S|...)."""
+    tag = (row.get("strategy") or "").strip()
+    if tag:
+        return tag
+    sid = (row.get("signal_id") or "").strip()
+    return sid.split("|", 1)[0] if "|" in sid else "RBOTE"
 
 
 def load_trades(path: Path) -> list[Trade]:
@@ -107,6 +117,7 @@ def load_trades(path: Path) -> list[Trade]:
                     risk_pct=float(row.get("risk_pct") or 0.0),
                     edge_mult=float(row.get("edge_mult") or 1.0),
                     scale_reason=(row.get("scale_reason") or "").strip(),
+                    strategy=_strategy_of(row),
                 )
             )
     trades.sort(key=lambda t: t.close_time)
@@ -385,6 +396,57 @@ def why_section(trades: Sequence[Trade], base_risk_fraction: float, start_balanc
     return out
 
 
+# --- per strategy ------------------------------------------------------------
+
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float:
+    if len(xs) < 3:
+        return float("nan")
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if sx == 0 or sy == 0:
+        return float("nan")
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sx * sy)
+
+
+def strategy_section(trades: Sequence[Trade], start_balance: float) -> list[str]:
+    """Profit and loss per strategy and how the strategies interact (shared account)."""
+    names = sorted({t.strategy for t in trades})
+    out = ["### Per strategy (which strategy made / lost money)", "",
+           "| strategy | trades | win % | avg R | expectancy R | PF | net money | share of net | max DD (own equity) |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    total_net = sum(t.net for t in trades)
+    for name in names + ["ALL"]:
+        ts = [t for t in trades if name == "ALL" or t.strategy == name]
+        if not ts:
+            continue
+        wins = sum(1 for t in ts if t.net > 0)
+        gross_w = sum(t.net for t in ts if t.net > 0)
+        gross_l = -sum(t.net for t in ts if t.net <= 0)
+        pf = gross_w / gross_l if gross_l > 0 else float("inf")
+        net = sum(t.net for t in ts)
+        eq = [start_balance]
+        for t in sorted(ts, key=lambda x: x.close_time):
+            eq.append(eq[-1] + t.net)
+        share = net / total_net if total_net else float("nan")
+        out.append(f"| {name} | {len(ts)} | {wins / len(ts):.1%} | {statistics.fmean(t.r for t in ts):.3f} | "
+                   f"{statistics.fmean(t.r for t in ts):.3f} | {_fmt(pf, '.2f')} | {net:,.2f} | "
+                   f"{_fmt(share, '.0%') if name != 'ALL' else '100%'} | {max_drawdown(eq):.2%} |")
+    if len(names) >= 2:
+        daily: dict[date, dict[str, float]] = {}
+        for t in trades:
+            daily.setdefault(t.close_time.date(), {}).setdefault(t.strategy, 0.0)
+            daily[t.close_time.date()][t.strategy] += t.net
+        a, b = names[0], names[1]
+        both = [(v.get(a, 0.0), v.get(b, 0.0)) for v in daily.values()]
+        corr = _pearson([x for x, _ in both], [y for _, y in both])
+        both_lost = sum(1 for v in daily.values() if v.get(a, 0.0) < 0 and v.get(b, 0.0) < 0)
+        out += ["", f"- daily P&L correlation {a} vs {b}: {_fmt(corr, '.2f')} "
+                f"(over {len(daily)} days with a closed trade; near 0 = diversifying, near 1 = same risk twice)",
+                f"- days on which both strategies lost: {both_lost}"]
+    return out
+
+
 # --- acceptance --------------------------------------------------------------
 
 @dataclass
@@ -465,6 +527,8 @@ def build_report(runs: dict[str, list[Trade]], oos_start: datetime | None, risk_
         passed = all(ok for _, ok, _ in checks)
         verdicts.append(f"## {name}: {'PASS' if passed else 'FAIL'}")
         verdicts.extend(f"- [{'x' if ok else ' '}] {label}: {value}" for label, ok, value in checks)
+        verdicts.append("")
+        verdicts.extend(strategy_section(trades, start_balance))
         verdicts.append("")
         verdicts.append("| year | trades | expectancy R |")
         verdicts.append("|---|---|---|")

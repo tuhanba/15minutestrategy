@@ -135,3 +135,20 @@ def test_money_monte_carlo_deterministic_single_value():
     mc = at.money_monte_carlo([-0.01] * 3, runs=50, seed=1)
     assert math.isclose(mc["p95"], 1 - 0.99 ** 3)
     assert math.isclose(mc["ret_p50"], 0.99 ** 3 - 1)
+
+
+def test_per_strategy_section(tmp_path):
+    p = tmp_path / "t.csv"
+    rows = [HEADER]
+    # RBOTE: one +6R win, one loss; DTBS: two losses and one +1.5R win (signal_id prefix tags the strategy)
+    data = [("RBOTE|B|1", 1500, "2024.01.02"), ("RBOTE|B|2", -250, "2024.01.03"),
+            ("DTBS|S|3", -250, "2024.01.03"), ("DTBS|S|4", -250, "2024.01.04"), ("DTBS|B|5", 375, "2024.01.05")]
+    for sid, net, d in data:
+        rows.append(f"{d} 10:00;{d} 12:00;1;100;100;99;106;1.00;250;{net};{net / 250:.4f};{sid};1.0;0;6.00;0;106")
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    trades = at.load_trades(p)
+    assert {t.strategy for t in trades} == {"RBOTE", "DTBS"}
+    text = "\n".join(at.strategy_section(trades, 100000.0))
+    assert "| RBOTE | 2 | 50.0% |" in text and "| DTBS | 3 | 33.3% |" in text
+    assert "| ALL | 5 |" in text
+    assert "days on which both strategies lost: 1" in text
