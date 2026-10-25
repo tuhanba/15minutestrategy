@@ -64,10 +64,13 @@ kullanılmaz) iadeli yeniden örneklenir. Karar Monte Carlo'ları ≥ 5 000 koş
    (katı okuma: 7 hafta içi gün), Ash, Phoenix, Thunderbolt karşılaştırma.
    - Risk ızgarası %0.25 / 0.30 / 0.35 / 0.40 / 0.50 (D-027). Ön ayar tavanı (`InpMaxRiskPct` %0.5, açık risk %0.5)
      üstü yalnız `--allow-above-cap` ile.
-   - **Karar bir kez, IS işlemleriyle**: P(günlük ihlal) < %5 **ve** P(max-loss/shield ihlali) < %10 olanlar içinde
-     Monte Carlo geçme olasılığı en yüksek risk; eşitlikte düşük risk. Ayrıca aynı kural **%0.35 tavanlı** (Upcomers
-     tek kazançla geçmeye yazılı onay verene kadar kullanılacak risk). OOS işlemleri yalnız doğrulama olarak gösterilir.
-   - EA'nın kişisel günlük (%2) ve izleyen (%4) limitlerine değme olasılıkları ek kısıt olarak raporlanır.
+   - **Karar bir kez, IS işlemleriyle**: her yöntem için P(firma günlük ihlali) < %5 **ve** P(firma max-loss/shield
+     ihlali) < %10 olanlar içinde geçme olasılığı en yüksek risk; eşitlikte düşük risk. **Tarihsel tekrar birincil,
+     Monte Carlo sağlamlık kontrolü (D-031)**: iki yöntem farklı risk seçerse veya seçilen riskte geçme oranları
+     10 puandan fazla ayrışırsa DÜŞÜK risk seçilir (iki yöntemde de kuralı sağlayan bir alt riske inilir) ve ayrışma
+     raporlanır; Monte Carlo hiçbir risk bulamazsa sonuç "none qualifies". Ayrıca aynı kural **%0.35 tavanlı**
+     (Upcomers tek kazançla geçmeye yazılı onay verene kadar kullanılacak risk). OOS işlemleri yalnız doğrulama.
+   - EA'nın kişisel limitleri simülasyonda **uygulanır** (D-032), firma ihlallerinden ayrı raporlanır.
 
 ### prop_sim modeli
 
@@ -79,6 +82,11 @@ kullanılmaz) iadeli yeniden örneklenir. Karar Monte Carlo'ları ≥ 5 000 koş
   ters hareket / stop uygulanır (muhafazakâr sıra, D-028). Ash Turbo'da kilit yok (belirtilmemiş).
 - Süreler gerçek tarihlerle: takvim limiti `tarih ≥ başlangıç + N gün` olunca biter (hafta sonu/tatil dahil);
   hareketsizlik = son kapanıştan 35 takvim günü; Ash Turbo 7 işlem günü = en az bir işlemin kapandığı gün sayısı.
+- Kişisel EA limitleri (D-032; firma kontrolleri önce yapılır, ikisini birden kıran hareket firma ihlali sayılır):
+  - günlük: equity < gün başı referansı − %2 × (Ash Turbo'da başlangıç bakiyesi, firmanın günlük ölçümüyle aynı;
+    floating MAE ile). O işlem çıkışına kadar sürer, o gün yeni işlem açılmaz, deneme devam eder.
+  - izleyen taban: equity < equity tepesi (MFE dahil) − %4 × başlangıç (EA `RB_TotalDDFloor`). Açık işlem çıkışına
+    kadar sürer (o çıkış hedefi tamamlarsa geçer), sonra EA durur: sonuç `personal_stop`.
 - Monte Carlo: **ardışık günlerden kayan blok bootstrap** (varsayılan 5 gün = bir işlem haftası, `--block`), 10 000
   deneme; her günün gerçek takvim boşluğu korunur.
 - Tarihsel tekrar: her hafta içi günden (veya `--replay-step month`) başlatılır; geçmişi yetmeyen başlangıçlar

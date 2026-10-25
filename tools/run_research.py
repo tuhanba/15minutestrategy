@@ -399,7 +399,9 @@ def main(argv=None) -> int:
     days_is, days_oos = ps.load_days(cis[1], cis[2]), ps.load_days(coos[1], coos[2])
     out += ["", "## C. Upcomers challenge simulation - FINAL configuration at flat risk", "",
             "Source backtest: FINAL arguments + `" + " ".join(CHALLENGE) + "` (no adaptive sizing; EA Turbo personal "
-            "daily guard 2%). Decision computed ONCE on IS trades; OOS shown only as validation (D-027). "
+            "daily guard 2%, D-030). Decision computed ONCE on IS trades; OOS shown only as validation (D-027). "
+            "Historical replay is the primary method, Monte Carlo the robustness check (D-031); the EA's personal "
+            "daily 2% and 4% trailing guards are enforced in the simulation (D-032). "
             f"Grid {', '.join(f'{r:.2%}' for r in grid_c)}; selection cap {ps.SELECTION_CAP:.2%}.", ""]
     for prog in ("ash_turbo", "ash_turbo_strict", "ash", "phoenix", "thunderbolt"):
         out.append(ps.report(days_is, prog, grid_c, args.sim_runs, 11, args.block, days_oos, args.allow_above_cap,

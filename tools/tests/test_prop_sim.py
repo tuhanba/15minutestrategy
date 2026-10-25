@@ -194,3 +194,54 @@ def test_report_caps_grid_and_validates():
     text = ps.report(days, "ash_turbo", [0.0025, 0.0035, 0.01], runs=100, seed=1, validation=days)
     assert "not simulated: 1.00%" in text and "| 1.000% |" not in text
     assert "capped at 0.35%" in text and "NOT used for the decision" in text
+
+
+def test_personal_daily_guard_blocks_rest_of_day():
+    # Ash Turbo, 1% risk: 2nd trade dips to 97 911 < 98 000 (personal 2% of initial) -> 3rd trade skipped,
+    # firm daily (97 000) not hit; the attempt continues the next day
+    days = days_from([[(-1.0, -1.0), (-1.0, -1.1), (-1.0, -1.0)], [(1.0, -0.2)], [(-1.0, -1.0)]])
+    out = ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01)
+    assert out.personal_daily_hit and out.skipped_trades == 1
+    assert out.trades >= 3 and out.reason not in ("daily", "personal_stop")
+
+
+def test_personal_trailing_floor_stops_attempt():
+    # -1R per day at 1%: day 5 dips to ~95 099 < 96 000 (peak 100k - 4% of initial) -> EA stops,
+    # long before the firm shield (94 000)
+    days = days_from([[(-1.0, -1.0)]] * 6)
+    out = ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01)
+    assert out.reason == "personal_stop" and out.personal_dd_hit and out.trades == 5
+    assert ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01, personal_dd=0).reason != "personal_stop"
+
+
+def test_personal_stop_open_trade_can_still_pass():
+    # peak 103k via MFE -> personal floor 99k; next trade dips to 98 475 then closes at 102 515 >= target
+    days = days_from([[(1.0, 0.0, 3.0)], [(1.5, -2.5, 1.5)], [(1.0, -0.1)]])
+    out = ps.attempt(it(days), ps.PROGRAMS["ash_turbo"], 0.01)
+    assert out.passed and out.personal_dd_hit and out.trades == 2
+
+
+def _res(table):
+    def s(passed, daily=0.0, max_loss=0.0):
+        return {"n": 100.0, "passed": passed, "daily": daily, "max_loss": max_loss}
+    return {r: {"replay": s(*rp), "mc": s(*mc)} for r, (rp, mc) in table.items()}
+
+
+def test_decision_replay_primary_lower_risk_on_divergence():
+    # agree on 0.35% and pass rates close -> 0.35%
+    d = ps.decide_combined(_res({0.0025: ((0.30,), (0.28,)), 0.0035: ((0.40,), (0.36,))}))
+    assert d.risk == 0.0035 and not d.notes
+    # replay picks 0.35%, MC picks 0.25% -> lower risk
+    d = ps.decide_combined(_res({0.0025: ((0.30,), (0.33,)), 0.0035: ((0.40,), (0.32,))}))
+    assert d.replay_pick == 0.0035 and d.mc_pick == 0.0025 and d.risk == 0.0025 and d.notes
+    # same pick but pass-rate gap 15 pp -> step down to the next risk that qualifies under both
+    d = ps.decide_combined(_res({0.0025: ((0.30,), (0.27,)), 0.003: ((0.35, 0.06), (0.30,)),
+                                 0.0035: ((0.50,), (0.35,))}))
+    assert d.risk == 0.0025 and any("gap" in n for n in d.notes)
+    # cap and constraints: MC max-loss 12% at 0.35% -> MC picks 0.25%, replay 0.35% -> 0.25%
+    d = ps.decide_combined(_res({0.0025: ((0.30,), (0.30,)), 0.0035: ((0.40,), (0.42, 0.0, 0.12)),
+                                 0.005: ((0.60,), (0.60,))}), cap=0.0035)
+    assert d.risk == 0.0025
+    # Monte Carlo finds nothing -> none qualifies
+    d = ps.decide_combined(_res({0.0025: ((0.30,), (0.30, 0.06))}))
+    assert d.risk is None
