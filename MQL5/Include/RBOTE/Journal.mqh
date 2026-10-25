@@ -52,6 +52,7 @@ private:
    string            m_trades_file;
    int               m_flags;
    bool              m_enabled;
+   ulong             m_uid;
 
    int               OpenAppend(const string name, const string header)
      {
@@ -65,20 +66,24 @@ private:
      }
 
 public:
-                     CRBJournal(void) { m_enabled = false; m_flags = 0; }
+                     CRBJournal(void) { m_enabled = false; m_flags = 0; m_uid = 0; }
 
-   //--- tester runs write to the COMMON folder so results survive the agent sandbox
+   //--- tester runs write to the COMMON folder so results survive the agent sandbox; every tester
+   //--- run gets a unique file suffix (parallel agents / repeated runs never share a file).
+   //--- Optimization passes do not write files at all.
    void              Init(bool enabled, long magic)
      {
-      m_enabled = enabled;
       bool tester = (bool)MQLInfoInteger(MQL_TESTER);
+      m_enabled = enabled && !(bool)MQLInfoInteger(MQL_OPTIMIZATION);
       m_flags = tester ? FILE_COMMON : 0;
+      if(m_uid == 0)
+         m_uid = GetMicrosecondCount();   // fixed per EA instance, so a re-Init keeps the same files
       string base = "RBOTE\\" + (tester ? "tester_" : "") + _Symbol + "_" + IntegerToString(magic);
       if(tester)
         {
          MqlDateTime dt;
          TimeToStruct(TimeLocal(), dt);
-         base += StringFormat("_%04d%02d%02d_%02d%02d%02d", dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+         base += StringFormat("_%04d%02d%02d_%02d%02d%02d_%I64u", dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec, m_uid);
         }
       else
          base += "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));

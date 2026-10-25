@@ -3,9 +3,10 @@
 //| XAUUSD M15: PD Array (FVG / OB) -> Rejection Block -> 0.79 OTE    |
 //| limit entry, fixed or structural stop, 6R (or 5R) target.        |
 //|                                                                  |
-//| Defaults are SAFE: live (real) accounts are refused unless three |
-//| explicit inputs are set; the stop unit must be chosen by the     |
-//| user; prop-firm limits are NOT assumed.                          |
+//| Defaults are SAFE: outside the tester every account (also demo / |
+//| prop evaluation) needs InpLiveConfirmLogin = its login; real     |
+//| accounts additionally need two more explicit inputs; the stop    |
+//| unit must be chosen; only hedging accounts are supported.        |
 //+------------------------------------------------------------------+
 #property copyright "RBOTE"
 #property version   "1.00"
@@ -24,7 +25,7 @@
 //--- inputs ---------------------------------------------------------
 input group "Safety / mode"
 input bool   InpAllowLiveTrading   = false;   // Allow REAL accounts (default: refused)
-input long   InpLiveConfirmLogin   = 0;       // Real account: type the account login to confirm
+input long   InpLiveConfirmLogin   = 0;       // REQUIRED on every non-tester account (demo/prop too): its login
 input bool   InpPropRulesVerified  = false;   // Real account: prop-firm rules verified by you
 input long   InpMagic              = 7915790; // Magic number
 
@@ -58,12 +59,13 @@ input int    InpOrderExpiryBars    = 8;       // Pending order lifetime in M15 b
 
 input group "Risk (test values, NOT prop-firm rules)"
 input double InpRiskPct            = 0.25;    // Risk per trade, % of min(balance, equity)
-input double InpDailyLossPct       = 2.0;     // Personal daily loss limit, % of day-start ref (Ash Turbo firm: 3% of initial)
+input double InpDailyLossPct       = 2.0;     // Personal daily loss limit, % (base below; Ash Turbo firm: 3% of initial)
+input bool   InpDailyOnInitial     = true;    // Daily limit = % of INITIAL balance (Ash Turbo rule); false = of day-start ref
 input double InpMaxOpenRiskPct     = 0.5;     // Open + pending + new risk cap, % of equity
 input double InpMaxTotalDDPct      = 4.0;     // Personal total drawdown, % of initial balance (Ash firm: 6%)
 input bool   InpTrailingDD         = true;    // Floor follows the equity peak, locks at initial (Ash rule)
 input double InpInitialBalance     = 0.0;     // Initial balance for total DD (0 = balance at first start)
-input int    InpMaxTradesPerDay    = 3;       // Max entries per server day (0 = off)
+input int    InpMaxTradesPerDay    = 3;       // Max entries per UTC day (00:00 UTC reset, 0 = off)
 input int    InpMaxPositions       = 1;       // Max open positions of this EA (0 = off)
 input int    InpMaxPending         = 1;       // Max pending orders of this EA (0 = off)
 input double InpCommissionPerLotRT = 0.0;     // Commission per lot, round turn (account currency)
@@ -71,13 +73,13 @@ input double InpSlippageTicks      = 10.0;    // Slippage allowance on the stop 
 input double InpMaxLots            = 50.0;    // Hard lot cap (Upcomers: 50 lots)
 
 input group "Challenge (Upcomers Ash Turbo)"
-input double   InpProfitTargetPct  = 2.0;     // Stop opening trades once closed balance is +X% (0 = off)
-input int      InpMaxTradingDays   = 7;       // Max days with a closed trade (0 = off)
-input int      InpChallengeDays    = 30;      // Calendar-day limit from the start (0 = off)
+input double   InpProfitTargetPct  = 0.0;     // Stop opening trades once closed balance is +X% (0 = off; Ash Turbo: 2)
+input int      InpMaxTradingDays   = 0;       // Max days with a closed trade (0 = off; Ash Turbo: 7)
+input int      InpChallengeDays    = 0;       // Calendar-day limit from the start (0 = off; Ash Turbo: 30)
 input datetime InpChallengeStart   = 0;       // Challenge start (server time, 0 = first EA start)
 
 input group "Time / news filters"
-input int    InpServerUtcOffset    = -99;     // Server time - UTC in hours (-99 = auto live; tester uses 2 unless set)
+input int    InpServerUtcOffset    = -99;     // Server time - UTC, hours (-99 = auto; tester: 2 winter / 3 US DST; custom UTC data: 0)
 input int    InpFridayCutoffHour   = 20;      // Friday: no new orders, cancel pending from this UTC hour (-1 off)
 input int    InpBlockFromHour      = -1;      // Daily block window start, UTC hour (-1 off)
 input int    InpBlockToHour        = -1;      // Daily block window end, UTC hour (exclusive)
@@ -141,24 +143,64 @@ datetime      g_last_bar    = 0;
 datetime      g_day         = 0;
 double        g_day_ref     = 0.0;
 bool          g_day_blocked = false;
+bool          g_wait_account = false;   // init deferred: account not known / not connected yet
+string        g_prefix      = "";       // global-variable namespace (login|symbol|magic hash)
+ulong         g_news_ms     = 0;        // last news check for pending orders (GetTickCount64)
 const ENUM_TIMEFRAMES TF    = PERIOD_M15;
 
 //+------------------------------------------------------------------+
 string DirText(int dir) { return dir == RB_DIR_BULL ? "BUY" : "SELL"; }
 
-//--- server time minus UTC, in seconds. Day boundaries, sessions and the Friday cutoff are UTC.
-//--- In the Strategy Tester TimeGMT() equals server time, so the offset must come from the input.
-int ServerOffsetSec(void)
+//--- n-th Sunday (n >= 1) of a month, 00:00
+datetime NthSunday(int year, int mon, int n)
+  {
+   MqlDateTime d;
+   ZeroMemory(d);
+   d.year = year;
+   d.mon  = mon;
+   d.day  = 1;
+   datetime first = StructToTime(d);
+   MqlDateTime f;
+   TimeToStruct(first, f);
+   int day = 1 + (7 - f.day_of_week) % 7 + 7 * (n - 1);
+   return first + (day - 1) * 86400;
+  }
+
+//--- US daylight saving time: second Sunday of March .. first Sunday of November (date resolution)
+bool UsDstActive(datetime t)
+  {
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return t >= NthSunday(d.year, 3, 2) && t < NthSunday(d.year, 11, 1);
+  }
+
+//--- server time minus UTC, in seconds, at server time `at` (0 = now). Day boundaries, sessions
+//--- and the Friday cutoff are UTC. In the Strategy Tester TimeGMT() equals server time, so the
+//--- offset comes from the input or, with -99, from the usual "New York close" broker clock:
+//--- UTC+2 in winter, UTC+3 while the US is on daylight saving time. Custom symbols built from
+//--- UTC data (backtest/ pipeline) must set InpServerUtcOffset = 0.
+int ServerOffsetSec(datetime at = 0)
   {
    if(InpServerUtcOffset != -99)
       return InpServerUtcOffset * 3600;
-   if((bool)MQLInfoInteger(MQL_TESTER))
-      return 2 * 3600;
+   if(g_tester)
+     {
+      static long cache_day = -1;
+      static int  cache_off = 2 * 3600;
+      datetime t = at > 0 ? at : TimeCurrent();
+      long day = (long)t / 86400;
+      if(day != cache_day)
+        {
+         cache_day = day;
+         cache_off = UsDstActive(t) ? 3 * 3600 : 2 * 3600;
+        }
+      return cache_off;
+     }
    long diff = (long)TimeTradeServer() - (long)TimeGMT();
    return (int)(MathRound(diff / 900.0) * 900);
   }
 
-datetime ServerToUtc(datetime t) { return (datetime)((long)t - ServerOffsetSec()); }
+datetime ServerToUtc(datetime t) { return (datetime)((long)t - ServerOffsetSec(t)); }
 
 void BuildConfig(void)
   {
@@ -222,6 +264,7 @@ void BuildConfig(void)
    g_lim.Defaults();
    g_lim.risk_pct           = InpRiskPct / 100.0;
    g_lim.daily_loss_pct     = InpDailyLossPct / 100.0;
+   g_lim.daily_on_initial   = InpDailyOnInitial;
    g_lim.max_open_risk_pct  = InpMaxOpenRiskPct / 100.0;
    g_lim.max_total_dd_pct   = InpMaxTotalDDPct / 100.0;
    g_lim.trailing_dd        = InpTrailingDD;
@@ -240,14 +283,72 @@ int AccountModeCode(void)
    return RB_ACC_REAL;
   }
 
-//--- initial balance for the total drawdown floor (stored once per account+magic)
+//--- account gate, evaluated at init and again right before every order
+int TradingPermission(void)
+  {
+   bool connected = g_tester || (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
+   return RB_TradingPermission(g_tester, AccountModeCode(), InpAllowLiveTrading, InpLiveConfirmLogin,
+                               AccountInfoInteger(ACCOUNT_LOGIN), InpPropRulesVerified, connected);
+  }
+
+//--- is a position with POSITION_IDENTIFIER == id open? (partial fills keep the order's metadata)
+bool PositionExistsById(ulong id)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t != 0 && (ulong)PositionGetInteger(POSITION_IDENTIFIER) == id)
+         return true;
+     }
+   return false;
+  }
+
+//--- is an order with this ticket still pending at the broker?
+bool OrderPending(ulong ticket)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+      if(OrderGetTicket(i) == ticket)
+         return true;
+   return false;
+  }
+
+int OwnPendingCount(void)
+  {
+   int n = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t != 0 && OrderGetInteger(ORDER_MAGIC) == InpMagic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+         n++;
+     }
+   return n;
+  }
+
+//+------------------------------------------------------------------+
+//| EA state in global variables (survives restarts). Every key is   |
+//| <g_prefix>.<name>, g_prefix = "RB." + FNV-1a(login|symbol|magic) |
+//+------------------------------------------------------------------+
+string GvKey(const string name) { return g_prefix + "." + name; }
+
+double GvGet(const string name, double def)
+  {
+   string k = GvKey(name);
+   return GlobalVariableCheck(k) ? GlobalVariableGet(k) : def;
+  }
+
+void GvSet(const string name, double v) { GlobalVariableSet(GvKey(name), v); }
+
+//--- initial balance for the total drawdown floor (stored once per account+symbol+magic)
 double InitialBalance(void)
   {
    if(InpInitialBalance > 0.0)
       return InpInitialBalance;
-   string k = "RBOTE." + IntegerToString(InpMagic) + ".initial_balance";
+   string k = GvKey("initial_balance");
    if(!GlobalVariableCheck(k))
+     {
       GlobalVariableSet(k, AccountInfoDouble(ACCOUNT_BALANCE));
+      GlobalVariablesFlush();
+     }
    return GlobalVariableGet(k);
   }
 
@@ -258,7 +359,7 @@ void UpdateDay(void)
    datetime d = RB_DayStart(TimeCurrent(), ServerOffsetSec());
    if(d == g_day)
       return;
-   string k = "RBOTE." + IntegerToString(InpMagic) + ".dayref." + IntegerToString((long)d);
+   string k = GvKey("dayref." + IntegerToString((long)d));
    double ref;
    if(GlobalVariableCheck(k))
       ref = GlobalVariableGet(k);
@@ -269,10 +370,11 @@ void UpdateDay(void)
       double bal0 = bal - RB_RealizedSince(d);
       ref = MathMax(bal0, MathMax(bal, eq));
       GlobalVariableSet(k, ref);
+      GlobalVariablesFlush();
      }
    g_day         = d;
    g_day_ref     = ref;
-   g_day_blocked = GlobalVariableCheck("RBOTE." + IntegerToString(InpMagic) + ".dayblock." + IntegerToString((long)d));
+   g_day_blocked = GlobalVariableCheck(GvKey("dayblock." + IntegerToString((long)d)));
    g_log.Log("DAY_START", "", "day_start_ref=" + DoubleToString(ref, 2), g_day_blocked ? "BLOCKED_TODAY" : "");
   }
 
@@ -281,23 +383,14 @@ void BlockToday(const string why)
    if(g_day_blocked)
       return;
    g_day_blocked = true;
-   GlobalVariableSet("RBOTE." + IntegerToString(InpMagic) + ".dayblock." + IntegerToString((long)g_day), 1.0);
-   g_log.Log("DAY_BLOCKED", "", why, "no new orders until next server day");
+   GlobalVariableSet(GvKey("dayblock." + IntegerToString((long)g_day)), 1.0);
+   GlobalVariablesFlush();
+   g_log.Log("DAY_BLOCKED", "", why, "no new orders until the next UTC day");
   }
 
 //+------------------------------------------------------------------+
-//| Adaptive-risk state in global variables (survives restarts)      |
+//| Adaptive-risk state                                              |
 //+------------------------------------------------------------------+
-string GvKey(const string name) { return "RBOTE." + IntegerToString(InpMagic) + "." + name; }
-
-double GvGet(const string name, double def)
-  {
-   string k = GvKey(name);
-   return GlobalVariableCheck(k) ? GlobalVariableGet(k) : def;
-  }
-
-void GvSet(const string name, double v) { GlobalVariableSet(GvKey(name), v); }
-
 void UpdateHighWaterMark(void)
   {
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -330,6 +423,7 @@ void SaveEdgeStats(void)
          GvSet("st.n." + IntegerToString(d) + "." + IntegerToString(b), g_stats.n[d][b]);
          GvSet("st.s." + IntegerToString(d) + "." + IntegerToString(b), g_stats.sum_r[d][b]);
         }
+   GlobalVariablesFlush();
   }
 
 int ScaleReasonCode(const string why)
@@ -428,7 +522,7 @@ int ActiveTradingDays(bool &today_counted)
    datetime start = ChallengeStart();
    if(!HistorySelect(start, TimeCurrent() + 60))
       return 0;
-   long today = ((long)TimeCurrent() - off) / 86400;
+   long today = ((long)TimeCurrent() - off) / 86400;   // UTC day numbers
    long seen[];
    int n = 0;
    for(int i = 0; i < HistoryDealsTotal(); i++)
@@ -439,7 +533,7 @@ int ActiveTradingDays(bool &today_counted)
       long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
       if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY && entry != DEAL_ENTRY_INOUT)
          continue;
-      long day = ((long)HistoryDealGetInteger(d, DEAL_TIME) - off) / 86400;
+      long day = (long)ServerToUtc((datetime)HistoryDealGetInteger(d, DEAL_TIME)) / 86400;
       bool dup = false;
       for(int j = 0; j < n && !dup; j++)
          dup = (seen[j] == day);

@@ -37,21 +37,44 @@ string RB_SpecText(const RBSymbolSpec &sp)
   }
 
 //+------------------------------------------------------------------+
+//| Global-variable namespace: "RB." + 8-hex FNV-1a of               |
+//| login|symbol|magic. Short enough that every key stays <= 63      |
+//| chars, unique per account + symbol + magic.                      |
+//+------------------------------------------------------------------+
+string RB_KeyPrefix(long login, const string sym, long magic)
+  {
+   string src = IntegerToString(login) + "|" + sym + "|" + IntegerToString(magic);
+   uchar  b[];
+   int    n = StringToCharArray(src, b, 0, WHOLE_ARRAY, CP_UTF8);
+   const uint prime = 16777619;
+   uint   h = (uint)2166136261;
+   for(int i = 0; i < n; i++)
+     {
+      if(b[i] == 0)
+         break;
+      h ^= (uint)b[i];
+      h *= prime;
+     }
+   return "RB." + StringFormat("%08X", h);
+  }
+
+//+------------------------------------------------------------------+
 //| Order metadata in terminal global variables (survive restarts).  |
-//| Key: RBOTE.<magic>.<order ticket>.<field>                         |
+//| Key: <prefix>.<order ticket>.<field>                             |
 //| POSITION_IDENTIFIER equals the opening order ticket, so the same |
 //| record serves the resulting position.                            |
 //+------------------------------------------------------------------+
 class CRBMeta
   {
 private:
-   long              m_magic;
+   string            m_prefix;
    string            Key(ulong ticket, const string field) const
      {
-      return "RBOTE." + IntegerToString(m_magic) + "." + IntegerToString((long)ticket) + "." + field;
+      return m_prefix + "." + IntegerToString((long)ticket) + "." + field;
      }
 public:
-   void              Init(long magic)                     { m_magic = magic; }
+   void              Init(const string prefix)             { m_prefix = prefix; }
+   string            Prefix(void) const                    { return m_prefix; }
    void              Set(ulong ticket, const string f, double v) { GlobalVariableSet(Key(ticket, f), v); }
    bool              Has(ulong ticket)                     { return GlobalVariableCheck(Key(ticket, "dir")); }
    double            Get(ulong ticket, const string f)
@@ -63,17 +86,64 @@ public:
      }
    void              Delete(ulong ticket)
      {
-      GlobalVariablesDeleteAll("RBOTE." + IntegerToString(m_magic) + "." + IntegerToString((long)ticket) + ".");
+      GlobalVariablesDeleteAll(m_prefix + "." + IntegerToString((long)ticket) + ".");
+      GlobalVariablesFlush();
+     }
+   void              Flush(void)                           { GlobalVariablesFlush(); }
+   //--- every ticket with stored metadata (keys <prefix>.<digits>.dir)
+   int               Tickets(ulong &out[])
+     {
+      ArrayResize(out, 0);
+      string head = m_prefix + ".";
+      int hl = StringLen(head);
+      for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
+        {
+         string name = GlobalVariableName(i);
+         int l = StringLen(name);
+         if(l <= hl + 4 || StringSubstr(name, 0, hl) != head || StringSubstr(name, l - 4) != ".dir")
+            continue;
+         string mid = StringSubstr(name, hl, l - 4 - hl);
+         bool digits = StringLen(mid) > 0;
+         for(int c = 0; c < StringLen(mid) && digits; c++)
+           {
+            ushort ch = StringGetCharacter(mid, c);
+            digits = (ch >= '0' && ch <= '9');
+           }
+         if(!digits)
+            continue;
+         ulong t = (ulong)StringToInteger(mid);
+         if(t == 0)
+            continue;
+         int k = ArraySize(out);
+         ArrayResize(out, k + 1);
+         out[k] = t;
+        }
+      return ArraySize(out);
      }
    //--- processed-signal markers (duplicate guard)
    string            SigKey(const string signal_id) const
      {
       string k = signal_id;
       StringReplace(k, "|", ".");
-      return "RBOTE." + IntegerToString(m_magic) + ".sig." + k;
+      return m_prefix + ".sig." + k;
      }
    bool              Processed(const string signal_id)     { return GlobalVariableCheck(SigKey(signal_id)); }
-   void              MarkProcessed(const string signal_id) { GlobalVariableSet(SigKey(signal_id), (double)TimeCurrent()); }
+   void              MarkProcessed(const string signal_id)
+     {
+      GlobalVariableSet(SigKey(signal_id), (double)TimeCurrent());
+      GlobalVariablesFlush();
+     }
+   //--- atomic claim: only one EA instance (same account/symbol/magic) wins a signal.
+   //--- The temporary variable starts at 0; SetOnCondition flips it to 1 exactly once.
+   bool              Claim(const string signal_id)
+     {
+      string k = signal_id;
+      StringReplace(k, "|", ".");
+      k = m_prefix + ".clm." + k;
+      if(!GlobalVariableCheck(k) && !GlobalVariableTemp(k))
+         return false;
+      return GlobalVariableSetOnCondition(k, 1.0, 0.0);
+     }
   };
 
 //--- is there already an order, position or historical order with this signal id?
@@ -131,19 +201,32 @@ datetime RB_DayStart(datetime server_t, int offset_sec)
    return (datetime)(utc0 + offset_sec);
   }
 
+//--- slippage allowance in account currency for `volume` lots of `sym`
+double RB_SlippageMoney(const string sym, double volume, double slippage_ticks)
+  {
+   if(!(slippage_ticks > 0.0))
+      return 0.0;
+   double tv = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(!(tv > 0.0))
+      tv = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+   return slippage_ticks * MathMax(tv, 0.0) * volume;
+  }
+
 //+------------------------------------------------------------------+
 //| Account-wide risk snapshot. ALL positions and pending orders on  |
 //| the account are included (any magic, any symbol) and treated as |
-//| fully correlated.                                                |
+//| fully correlated. Every risk includes commission and the         |
+//| slippage allowance (slippage_ticks x tick value per lot).        |
 //+------------------------------------------------------------------+
-bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start_ref, int offset_sec,
-                      RBRiskSnapshot &s, string &err)
+bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double slippage_ticks, double day_start_ref,
+                      int offset_sec, RBRiskSnapshot &s, string &err)
   {
    s.balance              = AccountInfoDouble(ACCOUNT_BALANCE);
    s.equity               = AccountInfoDouble(ACCOUNT_EQUITY);
    s.day_start_ref        = day_start_ref;
    s.realized_today       = 0.0;
    s.open_risk            = 0.0;
+   s.open_risk_now        = 0.0;
    s.pending_risk         = 0.0;
    s.trades_today         = 0;
    s.positions            = 0;
@@ -180,7 +263,8 @@ bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start
       double sl   = PositionGetDouble(POSITION_SL);
       double vol  = PositionGetDouble(POSITION_VOLUME);
       double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      ENUM_ORDER_TYPE ot = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      bool   buy  = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      ENUM_ORDER_TYPE ot = buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       if(PositionGetInteger(POSITION_MAGIC) == magic)
          s.positions++;
       if(sl <= 0.0)
@@ -188,14 +272,30 @@ bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start
          s.unprotected_position = true;
          continue;
         }
-      // loss from OPEN price to SL: already contains the floating P/L, so it is not added separately
+      double costs = commission_rt_per_lot * vol + RB_SlippageMoney(sym, vol, slippage_ticks);
+      // open_risk: loss from OPEN price to SL (exposure / total DD caps)
       double loss = RB_LossBetween(sym, ot, vol, open, sl);
       if(loss < 0.0)
         {
          err = "OrderCalcProfit failed for position " + IntegerToString((long)t);
          return false;
         }
-      s.open_risk += loss + commission_rt_per_lot * vol;
+      s.open_risk += loss + costs;
+      // open_risk_now: loss from the CURRENT close price to SL (daily check against equity,
+      // which already contains the floating P/L)
+      MqlTick tk;
+      if(!SymbolInfoTick(sym, tk) || tk.bid <= 0.0 || tk.ask <= 0.0)
+        {
+         err = "no quote for position " + IntegerToString((long)t);
+         return false;
+        }
+      double now_loss = RB_LossBetween(sym, ot, vol, buy ? tk.bid : tk.ask, sl);
+      if(now_loss < 0.0)
+        {
+         err = "OrderCalcProfit failed (current) for position " + IntegerToString((long)t);
+         return false;
+        }
+      s.open_risk_now += now_loss + costs;
      }
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -213,6 +313,7 @@ bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start
          continue;
       if(OrderGetInteger(ORDER_MAGIC) == magic)
          s.pending++;
+      string sym   = OrderGetString(ORDER_SYMBOL);
       double sl    = OrderGetDouble(ORDER_SL);
       double vol   = OrderGetDouble(ORDER_VOLUME_CURRENT);
       double price = OrderGetDouble(ORDER_PRICE_OPEN);
@@ -221,13 +322,13 @@ bool RB_BuildSnapshot(long magic, double commission_rt_per_lot, double day_start
          s.unprotected_position = true;   // a pending order without SL is unbounded risk too
          continue;
         }
-      double loss = RB_LossBetween(OrderGetString(ORDER_SYMBOL), ot, vol, price, sl);
+      double loss = RB_LossBetween(sym, ot, vol, price, sl);
       if(loss < 0.0)
         {
          err = "OrderCalcProfit failed for order " + IntegerToString((long)t);
          return false;
         }
-      s.pending_risk += loss + commission_rt_per_lot * vol;
+      s.pending_risk += loss + commission_rt_per_lot * vol + RB_SlippageMoney(sym, vol, slippage_ticks);
      }
    return true;
   }
@@ -252,13 +353,21 @@ double RB_RealizedSince(datetime from)
    return sum;
   }
 
-//--- high-impact news window check (economic calendar; not available in the Strategy Tester)
+//--- high-impact news window check (economic calendar; not available in the Strategy Tester).
+//--- CalendarValueHistory returns bool; the event count is ArraySize(values). When the
+//--- calendar cannot be read the check fails safe: blocked with what = "CALENDAR_UNAVAILABLE".
 bool RB_NewsBlocked(const string currency, int minutes_before, int minutes_after, string &what)
   {
    what = "";
    datetime now = TimeTradeServer();
    MqlCalendarValue values[];
-   int n = CalendarValueHistory(values, now - minutes_after * 60, now + minutes_before * 60, NULL, currency);
+   ResetLastError();
+   if(!CalendarValueHistory(values, now - minutes_after * 60, now + minutes_before * 60, NULL, currency))
+     {
+      what = "CALENDAR_UNAVAILABLE err=" + IntegerToString(GetLastError());
+      return true;
+     }
+   int n = ArraySize(values);
    for(int i = 0; i < n; i++)
      {
       MqlCalendarEvent ev;

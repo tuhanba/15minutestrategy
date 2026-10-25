@@ -18,6 +18,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import math
 import random
@@ -150,6 +151,62 @@ def monte_carlo_dd(r_values: Sequence[float], risk_fraction: float, runs: int, s
     return {"p50": pct(0.50), "p95": pct(0.95), "p99": pct(0.99)}
 
 
+def money_fractions(trades: Sequence[Trade], start_balance: float) -> list[float]:
+    """Each trade's actual money P&L as a fraction of the account balance at its entry.
+
+    balance at entry = start_balance + net of every trade closed at or before the entry time
+    (the trade file is the full closed-trade history of one run). This equals
+    r * risk_money / balance_at_entry, i.e. r times the trade's real risk fraction, so it sees
+    every sizing effect: profit scaling and the regime/edge multipliers (the `risk_pct` column
+    alone holds only the profit-scaled base %, not the regime x0.5 multiplier) and lot rounding.
+    """
+    if not trades:
+        return []
+    closed = sorted(trades, key=lambda t: t.close_time)
+    times = [t.close_time for t in closed]
+    cum = [0.0]
+    for t in closed:
+        cum.append(cum[-1] + t.net)
+    out = []
+    for t in trades:
+        bal = start_balance + cum[bisect.bisect_right(times, t.open_time)]
+        out.append(t.net / bal if bal > 0 else 0.0)
+    return out
+
+
+def money_monte_carlo(fracs: Sequence[float], runs: int, seed: int) -> dict[str, float]:
+    """Bootstrap of the trade order (with replacement) on the actual money P&L fractions.
+
+    Each resampled trade multiplies the balance by (1 + frac), so position size (regime x0.5,
+    adaptive risk) is kept. Returns max-DD percentiles and total-return percentiles.
+    """
+    keys = ("p50", "p95", "p99", "ret_p05", "ret_p50")
+    if not fracs:
+        return {k: float("nan") for k in keys}
+    rng = random.Random(seed)
+    n = len(fracs)
+    dds, rets = [], []
+    for _ in range(runs):
+        eq = peak = 1.0
+        worst = 0.0
+        for _ in range(n):
+            eq *= 1.0 + fracs[rng.randrange(n)]
+            if eq > peak:
+                peak = eq
+            elif (peak - eq) / peak > worst:
+                worst = (peak - eq) / peak
+        dds.append(worst)
+        rets.append(eq - 1.0)
+    dds.sort()
+    rets.sort()
+
+    def pct(xs: list[float], p: float) -> float:
+        return xs[min(len(xs) - 1, int(p * len(xs)))]
+
+    return {"p50": pct(dds, 0.50), "p95": pct(dds, 0.95), "p99": pct(dds, 0.99),
+            "ret_p05": pct(rets, 0.05), "ret_p50": pct(rets, 0.50)}
+
+
 def bootstrap_mean_ci(values: Sequence[float], runs: int, seed: int) -> tuple[float, float]:
     if len(values) < 2:
         return (float("nan"), float("nan"))
@@ -184,11 +241,25 @@ class Summary:
     max_dd: float
     mc: dict[str, float]
     breach_days: int
+    # money based (actual position size): see money_fractions / money_monte_carlo
+    return_frac: float = float("nan")        # net money / start balance
+    expectancy_frac: float = float("nan")    # mean P&L per trade as a fraction of balance at entry
+    money_mc: dict[str, float] | None = None
+
+    @property
+    def return_to_dd(self) -> float:
+        """Net return / money Monte Carlo max-DD p95 (manager D-024 adoption score)."""
+        dd = (self.money_mc or {}).get("p95", float("nan"))
+        if not (dd > 0) or math.isnan(self.return_frac):
+            return float("nan")
+        return self.return_frac / dd
 
 
 def summarize(trades: Sequence[Trade], risk_fraction: float, start_balance: float,
               daily_limit_frac: float, runs: int = 5000, seed: int = 7) -> Summary:
+    """`runs` is used for the bootstrap CI and for both Monte Carlo simulations (use >= 5000 for decisions)."""
     rs = [t.r for t in trades]
+    fracs = money_fractions(trades, start_balance)
     wins = [t for t in trades if t.net > 0]
     losses = [t for t in trades if t.net <= 0]
     gross_win = sum(t.net for t in wins)
@@ -210,8 +281,11 @@ def summarize(trades: Sequence[Trade], risk_fraction: float, start_balance: floa
         profit_factor=(gross_win / gross_loss) if gross_loss > 0 else (math.inf if gross_win > 0 else float("nan")),
         net_money=sum(t.net for t in trades),
         max_dd=max_drawdown(money_eq),
-        mc=monte_carlo_dd(rs, risk_fraction, runs // 5 or 1, seed),
+        mc=monte_carlo_dd(rs, risk_fraction, runs, seed),
         breach_days=len(daily_breaches(trades, start_balance, daily_limit_frac)),
+        return_frac=sum(t.net for t in trades) / start_balance if start_balance > 0 else float("nan"),
+        expectancy_frac=statistics.fmean(fracs) if fracs else float("nan"),
+        money_mc=money_monte_carlo(fracs, runs, seed),
     )
 
 
@@ -351,12 +425,14 @@ def _fmt(x: float, spec: str) -> str:
 def summary_row(name: str, s: Summary) -> str:
     return (f"| {name} | {s.n} | {_fmt(s.win_rate, '.1%')} | {_fmt(s.avg_win_r, '.2f')} | {_fmt(s.avg_loss_r, '.2f')} | "
             f"{_fmt(s.expectancy_r, '.3f')} | [{_fmt(s.ci_low, '.3f')}, {_fmt(s.ci_high, '.3f')}] | "
-            f"{_fmt(s.profit_factor, '.2f')} | {_fmt(s.net_money, ',.2f')} | {_fmt(s.max_dd, '.2%')} | "
-            f"{_fmt(s.mc['p95'], '.2%')} | {s.breach_days} |")
+            f"{_fmt(s.profit_factor, '.2f')} | {_fmt(s.net_money, ',.2f')} | {_fmt(s.return_frac, '.2%')} | "
+            f"{_fmt(s.expectancy_frac, '.3%')} | {_fmt(s.max_dd, '.2%')} | {_fmt(s.mc['p95'], '.2%')} | "
+            f"{_fmt((s.money_mc or {}).get('p95', float('nan')), '.2%')} | {_fmt(s.return_to_dd, '.2f')} | {s.breach_days} |")
 
 
-HEADER = ("| run / period | trades | win % | avg win R | avg loss R | expectancy R | 95% CI | PF | net | max DD | MC DD p95 | daily-limit days |\n"
-          "|---|---|---|---|---|---|---|---|---|---|---|---|")
+HEADER = ("| run / period | trades | win % | avg win R | avg loss R | expectancy R | 95% CI | PF | net $ | net % | "
+          "expectancy % of bal | max DD (money) | MC DD p95 (R, flat) | MC DD p95 (money) | net % / money DD p95 | daily-limit days |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
 
 def build_report(runs: dict[str, list[Trade]], oos_start: datetime | None, risk_fraction: float,
@@ -366,6 +442,9 @@ def build_report(runs: dict[str, list[Trade]], oos_start: datetime | None, risk_
                f"daily limit: {daily_limit_frac:.2%} | OOS from: {oos_start.date() if oos_start else 'not split'}")
     out.append("")
     out.append("Daily-limit days count CLOSED-trade losses only; intraday floating losses are not in the trade files.")
+    out.append("R columns ignore position size; money columns use each trade's actual P&L as a fraction of the "
+               "balance at entry (sizing effects included). 'MC DD p95 (R, flat)' re-sizes every trade at the flat "
+               "risk above; 'MC DD p95 (money)' resamples the actual money P&L fractions.")
     out.append("")
     out.append(HEADER)
     verdicts: list[str] = []
