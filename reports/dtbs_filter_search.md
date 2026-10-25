@@ -27,3 +27,20 @@ risk 0.35 % → pass ≈ 15–18 % per attempt; 0.50 % → ≈ 28–32 %. Failur
 
 Search ended (3 rounds used). The filter is in the EA as `InpDtbsCtxFilter` (on in the DTBS presets) for
 demo / tester forward testing only.
+
+## Independent market check: XAGUSD (pre-registered, manager D-043)
+
+Finalist unchanged, run on silver 2020-01 → 2026-10 (Dukascopy M1, data never looked at before).
+Symbol conversions fixed before the run: tick 0.001, 5 $/tick/lot (5,000 oz), commission 5 $/lot, slippage 10 ticks,
+stop buffer 0.30 × (silver / gold median M15 ATR 2020-23 = 0.0562 / 2.1164) = 0.008, swap 0.
+Pass rule: avg R > 0, PF ≥ 1.10, ≥ 60 % of years positive.
+
+| Run | Trades | Win % | Avg R | PF | Net $ | Max DD | Years positive |
+|---|---|---|---|---|---|---|---|
+| Finalist (ctx filter, 3R) | 492 | 17.7 | −0.326 | 0.57 | −32,989 | 37.4 % | 1 / 7 |
+| Finalist, no commission / slippage | 492 | 17.7 | −0.293 | 0.60 | −30,811 | 35.3 % | 1 / 7 |
+| W0 (no filter, 1.5R) | 1,264 | 26.9 | −0.358 | 0.47 | −66,693 | 66.9 % | 0 / 7 |
+
+Spread is relatively larger on silver (median spread ≈ 19 % of the stop vs 8 % on gold, about 0.1R more cost per trade),
+but that cannot explain a −0.29R result without commission. **Fails the independent check.**
+The gold result of the finalist is most likely luck or gold-specific; it is not a robust edge.

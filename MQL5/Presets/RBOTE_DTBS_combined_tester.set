@@ -65,7 +65,7 @@ InpDtbsSlAtrMult=1.5
 InpDtbsMinStopATR=0.5
 InpDtbsMaxStopATR=3.0
 ; D-041: context filter (D1 + H4 EMA50 slope with the trade) + 3R. 2020-23 +0.105R PF 1.14, 2024-26 +0.079R PF 1.10.
-; NOT validated (acceptance needs PF >= 1.30): demo / tester only.
+; NOT validated (OOS PF 1.10 < 1.30) and FAILED the silver check (-0.33R): demo / tester only.
 InpDtbsRR=3.0
 InpDtbsCtxFilter=true
 InpDtbsCtxEma=50
