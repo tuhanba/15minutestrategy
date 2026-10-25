@@ -29,6 +29,7 @@ hata görünür hale gelir. Ayrıca bu ortamda MT5 çalışmadığı için gerç
 | Dönem sonu | açık pozisyon son fiyattan kapatılır, `exit_reason=END` (`--end-close on`) |
 | Gün / seans / cuma kesimi | UTC (Upcomers günlük DD 00:00 UTC) |
 | Kişisel limitler | günlük limit (`--daily`) stratejinin parçası, aktif. Toplam DD tabanı araştırmada **kapalı** (`--max-dd 0 --dd-trailing off`): ilk ihlalde donma örneklemi keserdi; yalnız ölçülür (D-025) |
+| DTBS (`--strategy dtbs`) | sinyal kırılım barının kapanışında (EA ile aynı `RB_DtbsScanEx`, tüm geçmiş tek tarama); giriş sonraki dakikanın açılışında **piyasa** (alış ask, satış bid, ek kayma yok); ana trend H1+H4, M1'den kurulur, saat kovası broker saatine göre (`--htf-offset 2`). Doğrulama: 2026-10 kullanıcı tester ayındaki 10 DTBS işleminin 8'i aynı dakikada |
 | Firma limitleri | backtest'te yalnız raporlanır (`--firm-daily`, `--firm-max`, ...); uygulanır hâli `tools/prop_sim.py`'dedir |
 
 ## Araştırma planı (önceden kayıtlı: D-004 … D-009, D-023 … D-029 ile güncel)

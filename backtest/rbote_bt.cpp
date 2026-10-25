@@ -1,4 +1,4 @@
-// rbote_bt.cpp - independent backtester for RBOTE.
+// rbote_bt.cpp - independent backtester for RBOTE and DTBS (--strategy rbote|dtbs).
 //
 // Uses the SAME pure-logic headers as the MQL5 EA (MQL5/Include/RBOTE/*.mqh):
 // zone detection, rejection block, Fibonacci plan, lot sizing, risk guard,
@@ -15,6 +15,10 @@
 //   SL exit price = SL (or the worse open on a gap) minus slippage ticks
 //   TP-before-fill cancel is checked when the minute did not fill
 //   management stop changes take effect from the next minute
+// DTBS (spec docs/02): signal at the close of the break bar, MARKET entry at the open of the
+//   next minute (buy at ask open, sell at bid open, no extra slippage, D-034); main trend from
+//   H1 + H4 bars built from the same M1 data. H4 buckets follow the broker clock
+//   (--htf-offset, default UTC+2) so they match the MT5 H4 bars the EA sees.
 #include "../MQL5/Include/RBOTE/RejectionBlock.mqh"
 #include "../MQL5/Include/RBOTE/TradeMath.mqh"
 #include "../MQL5/Include/RBOTE/RiskGuard.mqh"
@@ -22,8 +26,10 @@
 #include "../MQL5/Include/RBOTE/Regime.mqh"
 #include "../MQL5/Include/RBOTE/Adaptive.mqh"
 #include "../MQL5/Include/RBOTE/TradeMgmt.mqh"
+#include "../MQL5/Include/RBOTE/DTBS.mqh"
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +63,10 @@ struct Options
    RBScaleCfg scale;
    RBEdgeCfg edge;
    RBMgmtCfg mgmt;
+   int strategy = 1;             // RB_SID_RBOTE / RB_SID_DTBS (Journal.mqh ids)
+   RBDtbsConfig dcfg;
+   int htf_offset_h = 2;         // broker clock - UTC for H1/H4 bucketing (EET winter = 2)
+   double min_stop_spread_mult = 2.0;
    double swap_long = 0.0;       // $ per lot per night (negative = cost), charged at the rollover hour
    double swap_short = 0.0;      // triple on Wednesday night
    int swap_hour = 21;           // UTC rollover hour (manager D-026)
@@ -151,6 +161,9 @@ struct Pending
    RBFeatures feat;
    int bars_alive = 0;
    long long placed = 0;
+   int sid = 1;           // 1 = RBOTE, 2 = DTBS
+   RBDtbsSignal ds;       // DTBS only (indexes are GLOBAL M15 indexes)
+   int used_mode = -1;    // DTBS stop mode actually used
 };
 
 struct Position
@@ -176,6 +189,9 @@ struct Engine
    CRBSeries m15;
    std::vector<int> m15_first;  // first M1 index of each M15 bar
    std::vector<SigEx> sigs;
+   std::vector<RBDtbsSignal> dsigs;
+   std::vector<RBRegime> dregs;
+   long n_tri = 0;
 
    double balance = 0, start_balance = 0, hwm = 0;
    int consec_losses = 0;
@@ -267,6 +283,78 @@ struct Engine
             e.sig = g;
             sigs.push_back(e);
            }
+        }
+     }
+
+   static std::string dtbs_id(int dir, long long break_time)
+     {
+      return std::string("DTBS|") + (dir == RB_DIR_BULL ? "B" : "S") + "|" + std::to_string(break_time);
+     }
+
+   // HTF bars from M1 bid, bucketed on the broker clock (offset hours), times stored in UTC
+   void build_htf(int period_sec, CRBSeries &out) const
+     {
+      out.Clear();
+      long long off = (long long)o.htf_offset_h * 3600;
+      long long cur = LLONG_MIN;
+      RBBar b{};
+      for(size_t i = 0; i < m1.size(); i++)
+        {
+         long long bucket = (m1[i].t + off) / period_sec * period_sec - off;
+         if(bucket != cur)
+           {
+            if(cur != LLONG_MIN)
+               out.Add(b);
+            cur = bucket;
+            b.time = bucket;
+            b.open = m1[i].bo;
+            b.high = m1[i].bh;
+            b.low = m1[i].bl;
+            b.close = m1[i].bc;
+           }
+         else
+           {
+            b.high = std::max(b.high, m1[i].bh);
+            b.low = std::min(b.low, m1[i].bl);
+            b.close = m1[i].bc;
+           }
+        }
+      if(cur != LLONG_MIN)
+         out.Add(b);
+     }
+
+   // One deterministic scan over the whole M15 history (the EA rescans its 1200-bar window every
+   // bar; triangles need <= max_leg_bars + ext_bars bars, so the signals are the same once warm).
+   // RB_DtbsHtfIndexAt only takes HTF bars whose close <= the M15 close: no lookahead.
+   void scan_dtbs()
+     {
+      CRBSeries h1, h4, all;
+      build_htf(3600, h1);
+      build_htf(4 * 3600, h4);
+      RBBar b;
+      for(int i = 0; i < m15.Size(); i++)
+        {
+         m15.Bar(i, b);
+         all.Add(b);
+        }
+      CRBVec<int> t1, t4, a1, a4, mt;
+      RB_DtbsTrendSeries(h1, o.dcfg.htf_swing_n, t1);
+      RB_DtbsTrendSeries(h4, o.dcfg.htf_swing_n, t4);
+      RB_DtbsAlignTrend(all, 900, h1, 3600, t1, a1);
+      RB_DtbsAlignTrend(all, 900, h4, 4 * 3600, t4, a4);
+      RB_DtbsCombineSeries(a1, a4, o.dcfg.htf_agreement, mt);
+      CRBVec<RBDtbsTriangle> tris;
+      CRBVec<RBDtbsSignal> ss;
+      RB_DtbsScanEx(all, mt, o.dcfg, tris, ss);   // computes ATR on `all` (regime uses it)
+      n_tri = tris.Size();
+      for(int i = 0; i < ss.Size(); i++)
+        {
+         RBDtbsSignal g;
+         ss.Get(i, g);
+         RBRegime rg;
+         RB_ClassifyRegime(all, g.break_idx, o.reg, rg);
+         dsigs.push_back(g);
+         dregs.push_back(rg);
         }
      }
 
@@ -362,23 +450,29 @@ struct Engine
       double mfe = risk0 > 0 ? dir * (pos.best - pos.fill) / risk0 : 0.0;
       double mae = risk0 > 0 ? dir * (pos.worst - pos.fill) / risk0 : 0.0;
       const RBSignal &g = pos.p.s.sig;
-      long long sig_time = (long long)g.confirm_time + 900;
+      bool dt = pos.p.sid == 2;
+      const RBDtbsSignal &d = pos.p.ds;
+      long long sig_time = dt ? (long long)d.break_time + 900 : (long long)g.confirm_time + 900;
       int delay = (int)((pos.open_time - sig_time) / 900);
-      double wick = pos.p.s.candle_range > 0 ? (g.rb_high - g.rb_low) / pos.p.s.candle_range : 0.0;
-      double rba = g.atr > 0 ? (g.rb_high - g.rb_low) / g.atr : 0.0;
-      double sta = g.atr > 0 ? risk0 / g.atr : 0.0;
+      double atr = dt ? d.atr : g.atr;
+      double wick = (!dt && pos.p.s.candle_range > 0) ? (g.rb_high - g.rb_low) / pos.p.s.candle_range : 0.0;
+      double rba = (!dt && g.atr > 0) ? (g.rb_high - g.rb_low) / g.atr : 0.0;
+      double sta = atr > 0 ? risk0 / atr : 0.0;
+      std::string sid_txt = dt ? dtbs_id(dir, d.break_time) : RB_SignalId(dir, g.rb_time);
       const RBRegime &rg = pos.p.s.reg;
       std::string regime = !rg.valid ? "UNKNOWN" : RB_VolText(rg.vol_class) + (rg.ranging ? "+RANGE" : "");
       std::fprintf(ft,
                    "%s;%s;%d;%.2f;%.3f;%.2f;%.2f;%.2f;%.2f;%.2f;%.4f;%s;%.3f;%d;%.2f;%d;%.3f;%s;%.3f;%.3f;%.2f;"
-                   "%s;%.2f;%.2f;%s;%d;%d;%d;%.3f;%.3f;%.3f;%d;%.3f;%.3f;%s\n",
+                   "%s;%.2f;%.2f;%s;%d;%d;%d;%.3f;%.3f;%.3f;%d;%.3f;%.3f;%s;%s;%s;%s\n",
                    fmt_time(pos.open_time).c_str(), fmt_time(t).c_str(), dir, pos.p.plan.entry, pos.fill,
                    pos.p.plan.sl, pos.p.plan.tp, pos.p.lots, pos.p.risk_money, net, r,
-                   RB_SignalId(dir, g.rb_time).c_str(), g.atr, g.zone_type, pos.p.rr,
-                   o.cfg.stop_mode, price, regime.c_str(), rg.vol_ratio, rg.er, pos.p.regime_mult, reason.c_str(),
+                   sid_txt.c_str(), atr, dt ? -1 : g.zone_type, pos.p.rr,
+                   dt ? pos.p.used_mode : o.cfg.stop_mode, price, regime.c_str(), rg.vol_ratio, rg.er, pos.p.regime_mult, reason.c_str(),
                    mfe, mae, RB_SessionText(RB_SessionBucket(utc_hour(sig_time))).c_str(), utc_hour(sig_time),
-                   utc_wday(sig_time), g.zones_hit, wick, rba, sta, delay, pos.p.pct * 100.0, pos.p.edge_mult,
-                   pos.p.scale_why.c_str());
+                   utc_wday(sig_time), dt ? 0 : g.zones_hit, wick, rba, sta, delay, pos.p.pct * 100.0, pos.p.edge_mult,
+                   pos.p.scale_why.c_str(), dt ? "DTBS" : "RBOTE",
+                   dt ? (d.with_trend ? "WITH_TREND" : "COUNTER") : "",
+                   dt ? RB_DtbsSlModeText(pos.p.used_mode).c_str() : "");
       n_trades++;
       stats.Add(pos.p.feat, r);
       consec_losses = net < 0 ? consec_losses + 1 : 0;
@@ -629,6 +723,100 @@ struct Engine
       n_orders++;
      }
 
+   // DTBS: market order at the first minute of the bar after the break bar
+   void on_dtbs_signal(size_t idx, int k)
+     {
+      const RBDtbsSignal &g = dsigs[idx];
+      n_signals++;
+      if(k + 1 >= m15.Size() || (long long)m15.Time(k + 1) != (long long)m15.Time(k) + 900)
+        {
+         reject("DATA_STALE");
+         return;
+        }
+      const M1 &m = m1[m15_first[k + 1]];
+      new_day_if_needed(m);
+      RBRegimeDecision rd;
+      RB_RegimeDecide(dregs[idx], o.reg, o.dcfg.rr, rd);
+      if(!rd.allow)
+        {
+         reject("REGIME_SKIP_" + rd.reason);
+         return;
+        }
+      if(day_blocked)
+        {
+         reject("DAILY_BLOCK");
+         return;
+        }
+      int wd = utc_wday(m.t), hr = utc_hour(m.t);
+      if(o.friday_cutoff >= 0 && ((wd == 5 && hr >= o.friday_cutoff) || wd == 6 || wd == 0))
+        {
+         reject("FRIDAY_CUTOFF");
+         return;
+        }
+      double spread = m.ao - m.bo;
+      double live = g.dir == RB_DIR_BULL ? m.ao : m.bo;
+      RBPlan plan;
+      int used = -1;
+      int r = RB_DtbsBuildPlanEx(g, o.dcfg, spec, live, spread, plan, used);
+      if(r != 0)
+        {
+         reject(RB_DtbsReasonText(r));
+         return;
+        }
+      r = RB_DtbsCheckMarket(plan, spec, m.bo, m.ao, o.min_stop_spread_mult);
+      if(r != 0)
+        {
+         reject(RB_DtbsReasonText(r));
+         return;
+        }
+      const M1 &prev = m1[m15_first[k + 1] - 1];
+      double eq = balance + floating(prev, false);
+      double ref = std::min(balance, eq);
+      std::string scale_why;
+      double pct = RB_ProfitScaledPct(o.scale, start_balance, balance, hwm, ref, consec_losses, scale_why);
+      double risk_money = RB_FinalRiskMoney(pct, ref, rd.risk_mult, 1.0, o.scale.max_pct);
+      double lpl = RB_LossPerLot(plan.risk_dist, spec, o.commission, o.slip_ticks);
+      double lots = 0;
+      r = RB_CalcLots(risk_money, lpl, spec, o.max_lots, lots);
+      if(r != 0)
+        {
+         reject(RB_ReasonText(r));
+         return;
+        }
+      double trade_risk = lots * lpl;
+      int gd = RB_CheckNewOrder(o.lim, snapshot(prev), trade_risk);
+      if(gd != 0)
+        {
+         reject(std::string("GUARD_") + RB_GuardText(gd));
+         return;
+        }
+      Pending p;
+      p.sid = 2;
+      p.ds = g;
+      p.used_mode = used;
+      p.plan = plan;
+      p.lots = lots;
+      p.risk_money = trade_risk;
+      p.pct = pct;
+      p.regime_mult = rd.risk_mult;
+      p.rr = o.dcfg.rr;
+      p.scale_why = scale_why;
+      p.s.reg = dregs[idx];
+      const RBRegime &rg = dregs[idx];
+      RB_MakeFeatures(g.dir, -1, rg.valid ? rg.vol_class : RB_VOL_NORMAL, rg.ranging, hr, p.feat);   // as the EA
+      p.placed = m.t;
+      n_orders++;
+      pos = Position();
+      pos.active = true;
+      pos.p = p;
+      pos.lots = lots;
+      pos.sl = plan.sl;
+      pos.fill = plan.entry;
+      pos.best = pos.worst = pos.fill;
+      pos.open_time = m.t;
+      trades_today++;
+     }
+
    // ------------------------------------------------------------------
    void run()
      {
@@ -655,7 +843,10 @@ struct Engine
          std::exit(2);
         }
       build_m15();
-      scan_signals();
+      if(o.strategy == 2)
+         scan_dtbs();
+      else
+         scan_signals();
 
       balance = start_balance = hwm = o.balance;
       min_equity_ever = balance;
@@ -667,10 +858,10 @@ struct Engine
       std::fprintf(ft, "open_time;close_time;dir;planned_entry;fill_price;sl;tp;volume;risk_money;net;r;signal_id;"
                        "atr;zone_type;rr;stop_mode;exit_price;regime;vol_ratio;er;risk_mult;"
                        "exit_reason;mfe_r;mae_r;session;hour;weekday;zones_hit;wick_ratio;rb_range_atr;stop_atr;"
-                       "fill_delay_bars;risk_pct;edge_mult;scale_reason\n");
+                       "fill_delay_bars;risk_pct;edge_mult;scale_reason;strategy;dtbs_break;dtbs_sl_mode\n");
       std::fprintf(fd, "date;day_ref;start_balance;min_equity;end_balance;fills\n");
 
-      size_t si = 0;
+      size_t si = 0, di = 0;
       int nb = m15.Size();
       for(int k = 0; k < nb; k++)
         {
@@ -688,9 +879,18 @@ struct Engine
            {
             while(si < sigs.size() && sigs[si].sig.confirm_idx <= k)
                si++;
+            while(di < dsigs.size() && dsigs[di].break_idx <= k)
+               di++;
             continue;
            }
          on_bar_close(k);
+         while(di < dsigs.size() && dsigs[di].break_idx < k)
+            di++;
+         while(di < dsigs.size() && dsigs[di].break_idx == k)
+           {
+            on_dtbs_signal(di, k);
+            di++;
+           }
          while(si < sigs.size() && sigs[si].sig.confirm_idx < k)
             si++;
          while(si < sigs.size() && sigs[si].sig.confirm_idx == k)
@@ -720,6 +920,10 @@ struct Engine
      {
       std::ostringstream s;
       s << "period " << o.from << " -> " << o.to << " | M1 bars " << m1.size() << " | M15 bars " << m15.Size() << "\n";
+      s << "strategy " << (o.strategy == 2 ? "DTBS" : "RBOTE");
+      if(o.strategy == 2)
+         s << " | triangles " << n_tri << " | dtbs signals (whole data) " << dsigs.size();
+      s << "\n";
       s << "signals " << n_signals << " | orders " << n_orders << " | closed trades " << n_trades << "\n";
       s << "final balance " << balance << " | net " << balance - o.balance << " | lowest equity " << min_equity_ever << "\n";
       s << "days breaching personal daily " << o.lim.daily_loss_pct * 100 << "%: " << n_personal_daily
@@ -753,7 +957,11 @@ static void usage()
        "  --rr 6 --fib 0.79 --stop fixed|structural|atr --stop-atr 2 --stop-dist 10 --stop-unit price|points|ticks --buffer 0.30 --max-stop-atr 3 --min-stop-atr 0\n"
        "  --wick 0.5 --close-rule body|close --confirm rb|next --zone-age 192\n"
        "  --regime neutral|policy|off   --adaptive on|off\n"
-       "  --be-r X --be-offset-r Y --trail-start-r X --trail-r Y --partial-r X --partial-frac F");
+       "  --be-r X --be-offset-r Y --trail-start-r X --trail-r Y --partial-r X --partial-frac F\n"
+       "  --strategy rbote|dtbs   DTBS: --dt-rr 1.5 --dt-ext 20 --dt-dirs both|with --dt-confirm close|wick\n"
+       "     --dt-sl adaptive|break_start|break_candle|extreme|atr --dt-buffer 0.30 --dt-sl-atr 1.5\n"
+       "     --dt-min-stop-atr 0.5 --dt-max-stop-atr 3 --dt-htf all|majority --dt-swing 2 --dt-htf-swing 2\n"
+       "     --dt-leg-atr 1.0 --dt-max-leg 200 --htf-offset 2");
 }
 
 int main(int argc, char **argv)
@@ -770,6 +978,7 @@ int main(int argc, char **argv)
    o.edge.Defaults();
    o.edge.enabled = false;
    o.mgmt.Defaults();
+   o.dcfg.Defaults();
    for(int i = 1; i < argc; i++)
      {
       std::string a = argv[i];
@@ -853,6 +1062,27 @@ int main(int argc, char **argv)
       else if(a == "--trail-r") o.mgmt.trail_dist_r = num();
       else if(a == "--partial-r") o.mgmt.partial_at_r = num();
       else if(a == "--partial-frac") o.mgmt.partial_frac = num();
+      else if(a == "--strategy") o.strategy = next() == "dtbs" ? 2 : 1;
+      else if(a == "--dt-rr") o.dcfg.rr = num();
+      else if(a == "--dt-ext") o.dcfg.ext_bars = (int)num();
+      else if(a == "--dt-dirs") o.dcfg.break_dirs = next() == "with" ? RB_DTBS_WITH_TREND_ONLY : RB_DTBS_BOTH;
+      else if(a == "--dt-confirm") o.dcfg.confirm = next() == "wick" ? RB_DTBS_CONFIRM_WICK : RB_DTBS_CONFIRM_CLOSE;
+      else if(a == "--dt-sl")
+        {
+         std::string v = next();
+         o.dcfg.sl_mode = v == "break_candle" ? RB_DTBS_SL_BREAK_CANDLE : v == "extreme" ? RB_DTBS_SL_EXTREME :
+                          v == "atr" ? RB_DTBS_SL_ATR : v == "break_start" ? RB_DTBS_SL_BREAK_START : RB_DTBS_SL_ADAPTIVE;
+        }
+      else if(a == "--dt-buffer") o.dcfg.sl_buffer_price = num();
+      else if(a == "--dt-sl-atr") o.dcfg.sl_atr_mult = num();
+      else if(a == "--dt-min-stop-atr") o.dcfg.min_stop_atr = num();
+      else if(a == "--dt-max-stop-atr") o.dcfg.max_stop_atr = num();
+      else if(a == "--dt-htf") o.dcfg.htf_agreement = next() == "majority" ? RB_DTBS_HTF_MAJORITY : RB_DTBS_HTF_ALL;
+      else if(a == "--dt-swing") o.dcfg.swing_n = (int)num();
+      else if(a == "--dt-htf-swing") o.dcfg.htf_swing_n = (int)num();
+      else if(a == "--dt-leg-atr") o.dcfg.min_leg_atr = num();
+      else if(a == "--dt-max-leg") o.dcfg.max_leg_bars = (int)num();
+      else if(a == "--htf-offset") o.htf_offset_h = (int)num();
       else
         {
          usage();
