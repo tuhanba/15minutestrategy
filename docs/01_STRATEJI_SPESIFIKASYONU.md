@@ -101,8 +101,8 @@ Bearish:  Entry = L + 0.79 × (H − L)   → Sell Limit  (tick'e yukarı yuvarl
 
 | Mod | Long SL | Short SL | Not |
 |---|---|---|---|
-| `FIXED` (varsayılan) | `Entry − d` | `Entry + d` | d = `InpStopDistance` × birim. SL tick'e **girişe doğru** yuvarlanır, asla genişlemez |
-| `STRUCTURAL` (karşılaştırma) | `L − buffer` | `H + buffer` | |
+| `STRUCTURAL` (varsayılan, 2026-10-25 / D-037) | `L − buffer` | `H + buffer` | buffer 0.30. Stop > `InpMaxStopATR` (3) × ATR14 (RB mumu) ise işlem yok (`STOP_TOO_WIDE_ATR`); 0 = kapalı |
+| `FIXED` (karşılaştırma) | `Entry − d` | `Entry + d` | d = `InpStopDistance` × birim. SL tick'e **girişe doğru** yuvarlanır, asla genişlemez. Kaynaktaki "10" yalnız örnekti (kullanıcı) |
 
 - `InpRequireSlBeyondRb = true`: sabit stop RB'nin dış ucunun **ötesinde değilse** (long: `SL > L`) işlem reddedilir. Görselde stop Fib 1'in hemen altındadır.
   Sonuç: RB yüksekliği `d / 0.21`'i aşarsa sinyal reddedilir (d = 10 için RB > 47.6 fiyat birimi).

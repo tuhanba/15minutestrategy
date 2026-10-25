@@ -459,6 +459,7 @@ void Test_FibAndPlan(CRBTest &t)
 
    RBSignal g;
    g.dir = RB_DIR_BULL;
+   g.atr = 0.0;                    // ATR cap tested separately below
    g.rb_low = 2650.00;
    g.rb_high = 2660.00;
    RBPlan p;
@@ -515,6 +516,23 @@ void Test_FibAndPlan(CRBTest &t)
    r = RB_BuildPlan(g, cs, sp, p);
    t.Check(r == 0, "structural plan ok");
    t.Near(p.sl, 2649.70, 1e-6, "structural SL = RB low - buffer");
+
+   // structural stop vs ATR cap: entry 2652.10, SL 2649.70 -> risk 2.40
+   g.atr = 1.00;                   // cap 3 x 1.00 = 3.00 >= 2.40
+   t.Check(RB_BuildPlan(g, cs, sp, p) == 0, "structural stop within 3xATR ok");
+   g.atr = 0.70;                   // cap 2.10 < 2.40
+   r = RB_BuildPlan(g, cs, sp, p);
+   t.Check(r == 19, "structural stop wider than 3xATR rejected");
+   t.Check(RB_ReasonText(19) == "STOP_TOO_WIDE_ATR", "reason text 19");
+   cs.max_stop_atr = 0.0;          // 0 = cap off
+   t.Check(RB_BuildPlan(g, cs, sp, p) == 0, "ATR cap off -> structural ok");
+   cs.max_stop_atr = 3.0;
+   g.atr = 0.0;                    // unknown ATR never blocks
+   t.Check(RB_BuildPlan(g, cs, sp, p) == 0, "ATR unknown -> cap skipped");
+   c10.max_stop_atr = 3.0;
+   g.atr = 0.70;                   // fixed mode: cap not applied (fixed stop is the user's choice)
+   t.Check(RB_BuildPlan(g, c10, sp, p) != 19, "ATR cap ignored in fixed mode");
+   g.atr = 0.0;
 
    // invalid RB range
    g.rb_low = 2660.00;

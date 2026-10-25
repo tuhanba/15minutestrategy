@@ -14,7 +14,7 @@ struct RBConfig
    int    atr_period;           // ATR used only for optional size filters
    bool   use_fvg;
    bool   use_ob;
-   double fvg_min_atr;          // ASSUMPTION: min FVG height in ATR (0 = off)
+   double fvg_min_atr;          // ASSUMPTION: min FVG height in ATR (0 = off); structural mode only
    int    ob_lookback;          // bars before the displacement candle searched for the OB candle
    int    swing_n;              // fractal strength for the OB break-of-structure check
    int    swing_search;         // how far back the BOS swing is searched
@@ -22,7 +22,7 @@ struct RBConfig
    // --- rejection block
    int    rb_close_rule;        // ENUM_RB_CLOSE_RULE
    double rb_min_wick_ratio;    // ASSUMPTION: rejection wick / candle range
-   double rb_min_wick_atr;      // ASSUMPTION: min rejection wick in ATR (0 = off)
+   double rb_min_wick_atr;      // ASSUMPTION: min rejection wick in ATR (0 = off); structural mode only
    bool   rb_require_approach;  // previous close must be outside the zone (price comes INTO it)
    int    rb_confirm;           // ENUM_RB_CONFIRM
    int    rb_confirm_bars;      // only for RB_CONFIRM_NEXT_CLOSE
@@ -36,6 +36,7 @@ struct RBConfig
    bool   require_sl_beyond_rb; // fixed stop must sit at/below RB low (bull) / at/above RB high (bear)
    double rr;                   // 6 (source), 5 as alternative
    double min_stop_spread_mult; // stop distance must be >= mult * current spread
+   double max_stop_atr;         // stop distance must be <= mult * ATR at the RB (0 = off); structural mode only
 
    void              Defaults(void)
      {
@@ -62,6 +63,7 @@ struct RBConfig
       require_sl_beyond_rb = true;
       rr                   = 6.0;
       min_stop_spread_mult = 2.0;
+      max_stop_atr         = 3.0;
      }
   };
 

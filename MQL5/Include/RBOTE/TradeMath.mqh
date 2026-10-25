@@ -40,6 +40,7 @@ string RB_ReasonText(int code)
       case 16: return "BAD_LOSS_PER_LOT";
       case 17: return "BAD_RISK_MONEY";
       case 18: return "BAD_RR";
+      case 19: return "STOP_TOO_WIDE_ATR";
      }
    return "UNKNOWN";
   }
@@ -139,6 +140,10 @@ int RB_BuildPlan(const RBSignal &sig, const RBConfig &cfg, const RBSymbolSpec &s
    double risk = MathAbs(entry - sl);
    if(risk < sp.tick_size - RB_EPS)
       return 5;
+   // Structural stop on an oversized RB: lot would collapse and the setup is atypical, skip it.
+   if(cfg.stop_mode == RB_STOP_STRUCTURAL && cfg.max_stop_atr > 0.0 && sig.atr > 0.0
+      && risk > cfg.max_stop_atr * sig.atr + RB_EPS)
+      return 19;
    double tp = (dir == RB_DIR_BULL) ? entry + cfg.rr * risk : entry - cfg.rr * risk;
    tp = RB_RoundToTick(tp, sp.tick_size);
    if(dir == RB_DIR_BULL && !(tp > entry))

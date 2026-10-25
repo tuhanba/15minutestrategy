@@ -3,7 +3,7 @@
 ; (days with a closed trade) within 30 calendar days, daily loss 3 000 $, 6% trailing floor.
 ; Risk per trade stays 0.25% until the challenge simulation picks a value (manager D-022: <= 0.35%
 ; unless Upcomers confirms that passing with a single win is allowed).
-; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source "Stop: 10.00" as 10.00 price units.
+; RBOTE stop: STRUCTURAL = RB wick extreme -+ 0.30, trade skipped if stop > 3 x ATR(14). Lot sized from stop so loss = risk %.
 ; Account confirmed 2026-10-25: XAUUSD digits 2, point 0.01 (10.00 price = 1000 points).
 InpAllowLiveTrading=false
 ; REQUIRED outside the Strategy Tester on EVERY account (demo / prop evaluation too):
@@ -16,9 +16,11 @@ InpEnableDTBS=false
 InpMagicDTBS=7915791
 InpFibLevel=0.79
 InpRR=6
-InpStopMode=0
+InpStopMode=1
 InpStopDistance=10.0
 InpStopUnit=0
+InpStructuralBuffer=0.30
+InpMaxStopATR=3.0
 InpRiskPct=0.25
 InpMaxRiskPct=0.5
 InpDailyLossPct=2.0

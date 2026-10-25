@@ -57,10 +57,11 @@ input int    InpRbConfirmBars      = 3;       // NEXT_CLOSE: bars allowed for co
 
 input group "Entry / exit"
 input double InpFibLevel           = 0.79;    // Fibonacci entry level on the RB range
-input ENUM_RB_STOP_MODE InpStopMode = RB_STOP_FIXED; // Stop mode
-input double InpStopDistance       = 10.0;    // Fixed stop distance (source: 10)
+input ENUM_RB_STOP_MODE InpStopMode = RB_STOP_STRUCTURAL; // Stop mode (STRUCTURAL: RB wick extreme + buffer)
+input double InpStopDistance       = 10.0;    // FIXED mode only: stop distance (comparison variant)
 input ENUM_RB_DIST_UNIT InpStopUnit = RB_UNIT_PRICE; // Unit of the stop distance (PRICE: 10.0 = 10.00 $ on XAUUSD)
 input double InpStructuralBuffer   = 0.30;    // Structural stop: buffer beyond RB extreme (price)
+input double InpMaxStopATR         = 3.0;     // Structural stop: skip trade if stop > x ATR(14) (0 = off)
 input bool   InpRequireSlBeyondRb  = true;    // Fixed stop must be beyond the RB extreme
 input double InpRR                 = 6.0;     // Target in R (6 source, 5 alternative)
 input double InpMinStopSpreadMult  = 2.0;     // Stop >= mult x current spread
@@ -266,6 +267,7 @@ void BuildConfig(void)
    g_cfg.stop_distance        = InpStopDistance;
    g_cfg.stop_unit            = InpStopUnit;
    g_cfg.structural_buffer    = InpStructuralBuffer;
+   g_cfg.max_stop_atr         = InpMaxStopATR;
    g_cfg.require_sl_beyond_rb = InpRequireSlBeyondRb;
    g_cfg.rr                   = InpRR;
    g_cfg.min_stop_spread_mult = InpMinStopSpreadMult;
@@ -662,7 +664,8 @@ int OnInit(void)
                             InpRiskMultHighVol > 1.0 || InpRiskMultLowVol > 1.0 || InpRiskMultRange > 1.0 ||
                             !(InpVolLowThr < InpVolHighThr && InpVolHighThr < InpVolExtremeThr))) ||
       InpMaxRiskPct < InpRiskPct || InpMaxRiskPct > 2.0 || InpProfitSharePct < 0.0 ||
-      InpEdgeMinMult <= 0.0 || InpEdgeMinMult > 1.0 || InpEdgeMaxMult < 1.0 || InpEdgePrior < 0.0)
+      InpEdgeMinMult <= 0.0 || InpEdgeMinMult > 1.0 || InpEdgeMaxMult < 1.0 || InpEdgePrior < 0.0 ||
+      InpMaxStopATR < 0.0 || InpStructuralBuffer < 0.0)
      {
       g_log.Log("INIT_REFUSED", "", "invalid inputs", "check fib/rr/risk/lookback");
       return INIT_PARAMETERS_INCORRECT;

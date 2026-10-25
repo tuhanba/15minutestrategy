@@ -1,5 +1,5 @@
 ; RBOTE tester preset: 6R_structural
-; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source chart's "Stop: 10.00" as 10.00 price units.
+; RBOTE stop: STRUCTURAL = RB wick extreme -+ 0.30, trade skipped if stop > 3 x ATR(14). Lot sized from stop so loss = risk %.
 ; Verify against the source before trusting results. Structural preset ignores the fixed stop.
 InpAllowLiveTrading=false
 ; InpLiveConfirmLogin is ignored in the tester; outside it EVERY account needs it = its login.
@@ -17,6 +17,7 @@ InpStopMode=1
 InpStopDistance=10.0
 InpStopUnit=0
 InpStructuralBuffer=0.30
+InpMaxStopATR=3.0
 InpRequireSlBeyondRb=true
 InpRiskPct=0.25
 InpDailyLossPct=1.0
