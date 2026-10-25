@@ -1,5 +1,5 @@
 ; RBOTE tester preset: 6R_fixed10price
-; ASSUMPTION: InpStopUnit=0 (PRICE) reads the source chart's "Stop: 10.00" as 10.00 price units.
+; ASSUMPTION: InpRbStopUnit=0 (PRICE) reads the source chart's "Stop: 10.00" as 10.00 price units.
 ; Verify against the source before trusting results. Structural preset ignores the fixed stop.
 InpAllowLiveTrading=false
 ; InpLiveConfirmLogin is ignored in the tester; outside it EVERY account needs it = its login.
@@ -13,9 +13,9 @@ InpMagicDTBS=7915791
 InpDtbsRiskPct=0.25
 InpFibLevel=0.79
 InpRR=6
-InpStopMode=0
+InpRbStopMode=0
 InpStopDistance=10.0
-InpStopUnit=0
+InpRbStopUnit=0
 InpStructuralBuffer=0.30
 InpRequireSlBeyondRb=true
 InpRiskPct=0.25

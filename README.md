@@ -104,7 +104,7 @@ terminale dokunmaz. Terminal erişimi yalnız `MT5Bridge.mqh`, `Journal.mqh` ve 
 2. MetaEditor'de `Scripts/RBOTE/RBOTE_Tests.mq5` ve `Experts/RBOTE/RBOTE_EA.mq5` dosyalarını derle (F7). **0 hata** olmalı.
 3. `RBOTE_Tests` script'ini herhangi bir grafiğe sürükle. Experts sekmesinde `RBOTE tests: passed=234 failed=0` ve `ALL PASSED` görünmeli.
 4. **Demo** hesapta XAUUSD M15 grafiğine EA'yı ekle. **Algo Trading** açık olmalı.
-   - `InpStopUnit` seçilmezse EA başlamaz. `PRICE` seçmek, "10" değerini 10.00 fiyat birimi kabul etmek demektir.
+   - Varsayılan stop YAPISAL (RB fitil ucu ± 0.30, > 3 × ATR ise işlem yok). `InpRbStopUnit` yalnız FIXED karşılaştırma modunda kullanılır (`PRICE`: 10 = 10.00 $).
    - `InpCommissionPerLotRT` alanına broker komisyonunu gir.
 5. Journal: `MQL5/Files/RBOTE/<sembol>_<magic>_<login>_journal.csv`. Tester'da: `Common/Files/RBOTE/tester_*`.
 
@@ -199,7 +199,7 @@ Ayrıntılar `docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md` içinde.
 
 | # | Konu | Varsayılan | Neden belirsiz |
 |---|---|---|---|
-| 1 | Stop "10"un birimi | Seçilmeden EA başlamaz. Ön ayarlar `PRICE` (10.00) kullanır | Görsel TradingView fiyat mesafesi gösteriyor ve kaynak muhtemelen NQ |
+| 1 | Stop "10"un birimi | Kullanıcı: "10 sadece örnekti". Varsayılan yapısal stop; sabit 10.00 yalnız karşılaştırma (`PRICE`) | Görsel TradingView fiyat mesafesi gösteriyor ve kaynak muhtemelen NQ |
 | 2 | RB fitil oranı ≥ 0.5 | `InpRbMinWickRatio` | Kaynakta sayısal eşik yok |
 | 3 | Yaklaşma kuralı (önceki kapanış bölge dışında) | açık | Kaynakta açıkça yok |
 | 4 | Onay = RB mumunun kapanışı | `InpRbConfirm` | Görselde ek onay mumu yok |

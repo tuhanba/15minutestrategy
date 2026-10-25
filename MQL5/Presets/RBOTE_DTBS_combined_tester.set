@@ -1,5 +1,5 @@
 ; RBOTE + DTBS tester preset: both strategies in one EA, baseline settings
-; RBOTE = RBOTE_6R_fixed10price baseline (6R, fixed 10.00 price stop, regime logged only, flat risk).
+; RBOTE = 6R, STRUCTURAL stop (RB wick extreme -+ 0.30, skip if stop > 3 x ATR14), regime logged only, flat risk.
 ; Risk and limits are account-wide (daily loss, open risk); positions/pending/trades per day per strategy.
 ; Multi-year research: challenge rules OFF, total-DD floor OFF, commission 5 $/lot.
 InpAllowLiveTrading=false
@@ -11,9 +11,9 @@ InpEnableDTBS=true
 InpMagicDTBS=7915791
 InpFibLevel=0.79
 InpRR=6
-InpStopMode=1
+InpRbStopMode=1
 InpStopDistance=10.0
-InpStopUnit=0
+InpRbStopUnit=0
 InpStructuralBuffer=0.30
 InpMaxStopATR=3.0
 InpRequireSlBeyondRb=true

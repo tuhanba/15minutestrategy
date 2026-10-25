@@ -23,7 +23,7 @@ Her kutu kanıtla (rapor dosyası, log, ekran görüntüsü) işaretlenir. Bir m
 - [ ] Duplicate sinyal → tek emir
 - [ ] Yeniden başlatma testi: kesintili koşu = kesintisiz koşu
 - [ ] Gerçek hesapta EA'yı varsayılan ayarlarla eklemek `INIT_REFUSED LIVE_DISABLED_BY_DEFAULT` veriyor
-- [ ] `InpStopUnit` seçilmeden EA başlamıyor
+- [ ] `InpRbStopUnit` seçilmeden EA başlamıyor
 
 ## Aşama 2 — Backtest
 

@@ -3220,11 +3220,20 @@ input bool   InpRbRequireApproach  = true;    // Previous close must be outside 
 input ENUM_RB_CONFIRM InpRbConfirm = RB_CONFIRM_RB_CLOSE; // Confirmation candle
 input int    InpRbConfirmBars      = 3;       // NEXT_CLOSE: bars allowed for confirmation
 
+// Stop unit offered in the inputs. No "not set" value: an old cached tester value can no
+// longer block the start (RB_UNIT_NOT_SET stays in the core library for its own checks).
+enum ENUM_RB_EA_STOP_UNIT
+  {
+   RB_EA_UNIT_PRICE  = 0, // price distance (10.0 = 10.00 $ on XAUUSD)
+   RB_EA_UNIT_POINTS = 1, // multiples of SYMBOL_POINT
+   RB_EA_UNIT_TICKS  = 2  // multiples of SYMBOL_TRADE_TICK_SIZE
+  };
+
 input group "Entry / exit"
 input double InpFibLevel           = 0.79;    // Fibonacci entry level on the RB range
-input ENUM_RB_STOP_MODE InpStopMode = RB_STOP_STRUCTURAL; // Stop mode (STRUCTURAL: RB wick extreme + buffer)
+input ENUM_RB_STOP_MODE InpRbStopMode = RB_STOP_STRUCTURAL; // RBOTE stop mode (STRUCTURAL: RB wick extreme + buffer)
 input double InpStopDistance       = 10.0;    // FIXED mode only: stop distance (comparison variant)
-input ENUM_RB_DIST_UNIT InpStopUnit = RB_UNIT_PRICE; // Unit of the stop distance (PRICE: 10.0 = 10.00 $ on XAUUSD)
+input ENUM_RB_EA_STOP_UNIT InpRbStopUnit = RB_EA_UNIT_PRICE; // FIXED mode only: unit of the stop distance
 input double InpStructuralBuffer   = 0.30;    // Structural stop: buffer beyond RB extreme (price)
 input double InpMaxStopATR         = 3.0;     // Structural stop: skip trade if stop > x ATR(14) (0 = off)
 input bool   InpRequireSlBeyondRb  = true;    // Fixed stop must be beyond the RB extreme
@@ -3428,9 +3437,9 @@ void BuildConfig(void)
    g_cfg.rb_confirm           = InpRbConfirm;
    g_cfg.rb_confirm_bars      = InpRbConfirmBars;
    g_cfg.fib_level            = InpFibLevel;
-   g_cfg.stop_mode            = InpStopMode;
+   g_cfg.stop_mode            = InpRbStopMode;
    g_cfg.stop_distance        = InpStopDistance;
-   g_cfg.stop_unit            = InpStopUnit;
+   g_cfg.stop_unit            = (int)InpRbStopUnit;
    g_cfg.structural_buffer    = InpStructuralBuffer;
    g_cfg.max_stop_atr         = InpMaxStopATR;
    g_cfg.require_sl_beyond_rb = InpRequireSlBeyondRb;
@@ -3816,13 +3825,6 @@ int OnInit(void)
    if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
       g_log.Log("WARN", "", "symbol " + _Symbol, "strategy was specified for XAUUSD");
 
-   //--- 1. parameters that must be chosen explicitly
-   if(InpEnableRBOTE && InpStopMode == RB_STOP_FIXED && InpStopUnit == RB_UNIT_NOT_SET)
-     {
-      g_log.Log("INIT_REFUSED", "", "InpStopUnit not set",
-                "choose PRICE / POINTS / TICKS for the 10-point stop; it is never assumed");
-      return INIT_PARAMETERS_INCORRECT;
-     }
    if(!(InpFibLevel > 0.0 && InpFibLevel < 1.0) || !(InpRR > 0.0) || !(InpRiskPct > 0.0) || InpRiskPct > 2.0 ||
       !(InpDailyLossPct > 0.0) || InpLookbackBars < InpZoneMaxAgeBars + 50 ||
       (InpRegimeEnabled && (InpLookbackBars < InpRegimeAtrLookback + InpRangeErPeriod + 20 ||
@@ -3918,10 +3920,10 @@ int AccountInit(void)
       g_log.Log("INIT_REFUSED", "", RB_SpecText(g_spec), "BAD_SYMBOL_SPEC");
       return INIT_FAILED;
      }
-   double stop_px = RB_DistanceToPrice(InpStopDistance, InpStopUnit, g_spec);
+   double stop_px = RB_DistanceToPrice(InpStopDistance, (int)InpRbStopUnit, g_spec);
    g_log.Log("SYMBOL_SPEC", "", RB_SpecText(g_spec),
              StringFormat("stop %s %s = %s price = %s points = %s per lot",
-                          DoubleToString(InpStopDistance, 2), EnumToString(InpStopUnit),
+                          DoubleToString(InpStopDistance, 2), EnumToString(InpRbStopUnit),
                           DoubleToString(stop_px, g_spec.digits),
                           DoubleToString(stop_px / g_spec.point, 1),
                           DoubleToString(stop_px / g_spec.tick_size * g_spec.tick_value_loss, 2)));
@@ -3959,7 +3961,7 @@ int AccountInit(void)
    g_ready = true;
    g_log.Log("INIT_OK", "", g_tester ? "tester" : (AccountModeCode() == RB_ACC_DEMO ? "demo" : "LIVE"),
              StringFormat("login=%I64d keys=%s rr=%.1f fib=%.2f stop_mode=%s risk=%.2f%% daily=%.2f%% of %s utc_offset=%dh",
-                          login, g_prefix, InpRR, InpFibLevel, EnumToString(InpStopMode), InpRiskPct, InpDailyLossPct,
+                          login, g_prefix, InpRR, InpFibLevel, EnumToString(InpRbStopMode), InpRiskPct, InpDailyLossPct,
                           InpDailyOnInitial ? "initial" : "day-start ref", ServerOffsetSec() / 3600));
    return INIT_SUCCEEDED;
   }
@@ -5012,7 +5014,7 @@ bool ProcessClosedPosition(ulong pos, bool order_gone = false)
    row.atr             = g_meta.Get(pos, "atr");
    row.zone_type       = (int)g_meta.Get(pos, "zty");
    row.rr              = g_meta.Get(pos, "rr");
-   row.stop_mode       = sid == RB_SID_DTBS ? -1 : (int)InpStopMode;   // RBOTE column; DTBS sl mode is in the journal
+   row.stop_mode       = sid == RB_SID_DTBS ? -1 : (int)InpRbStopMode;   // RBOTE column; DTBS sl mode is in the journal
    row.exit_price      = px;
    row.vol_class       = (int)g_meta.Get(pos, "vc");
    row.ranging         = g_meta.Get(pos, "rng") > 0.5;
@@ -5226,7 +5228,7 @@ double OnTester(void)
    double dd     = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
    double net    = TesterStatistics(STAT_PROFIT);
    PrintFormat("[RBOTE] tester: trades=%.0f net=%.2f PF=%.2f maxEquityDD=%.2f%% rr=%.1f stop_mode=%s; trades file: Common\\Files\\%s",
-               trades, net, pf, dd, InpRR, EnumToString(InpStopMode), g_log.TradesFile());
+               trades, net, pf, dd, InpRR, EnumToString(InpRbStopMode), g_log.TradesFile());
    int n_rb, n_dt, n_ot;
    double net_rb, net_dt, net_ot;
    StrategyTotals(n_rb, net_rb, n_dt, net_dt, n_ot, net_ot);

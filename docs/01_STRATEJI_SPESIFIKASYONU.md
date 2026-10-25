@@ -6,7 +6,7 @@ v0.1 → v0.2 değişiklikleri:
 - Platform kararı: **saf MQL5 EA** (kullanıcı kararı). Python yolu kaldırıldı.
 - Fibonacci **yalnızca RB sınırlarına** çizilir (kaynak görsel). "Swing bacağı" modu kaldırıldı.
 - RB tanımı görsele göre tek mum: fitil = Fib 1, gövde ucu = Fib 0.
-- Varsayılan stop: kaynağın sabit "10" mesafesi. Birim kullanıcı seçmeden EA başlamaz.
+- Varsayılan stop: YAPISAL (RB fitil ucu ± 0.30, stop > 3 × ATR ise işlem yok). Kaynağın sabit "10" mesafesi yalnız karşılaştırma varyantı (kullanıcı: "sadece örnekti").
 - Varsayılan hedef 6R, alternatif 5R.
 
 ---
@@ -120,7 +120,7 @@ EA şu değerleri MT5'ten okur ve başlangıçta loglar:
 - `SYMBOL_TRADE_TICK_VALUE_LOSS`, `VOLUME_MIN/MAX/STEP`
 - `TRADE_STOPS_LEVEL`, `TRADE_FREEZE_LEVEL`
 
-| `InpStopUnit` | 10 → fiyat (digits=2, point=0.01) | 1 lotta (tick value 1 $) | Değerlendirme |
+| `InpRbStopUnit` | 10 → fiyat (digits=2, point=0.01) | 1 lotta (tick value 1 $) | Değerlendirme |
 |---|---|---|---|
 | `NOT_SET` (varsayılan) | — | — | **EA başlamaz** |
 | `POINTS` | 0.10 | 10 $ | Spread kuralına takılır, işlem yok |
