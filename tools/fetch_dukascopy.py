@@ -70,15 +70,23 @@ def cache_path(cache: Path, sym: str, day: date, side: str) -> Path:
     return cache / f"{sym}_{day.isoformat()}_{side}.bi5"
 
 
-def download(sym: str, day: date, side: str, cache: Path) -> None:
+def download(sym: str, day: date, side: str, cache: Path) -> str | None:
+    """Returns an error text instead of raising, so one bad file never stops the whole run."""
     url = URL.format(sym=sym, y=day.year, m=day.month - 1, d=day.day, side=side)
-    fetch(url, cache_path(cache, sym, day, side), retries=12)
+    try:
+        fetch(url, cache_path(cache, sym, day, side), retries=12)
+        return None
+    except Exception as e:  # noqa: BLE001 - reported and retried on the next run
+        return f"{day.isoformat()} {side}: {e}"
 
 
 def day_rows(sym: str, day: date, cache: Path, divisor: float) -> list[str]:
     rows: list[str] = []
-    bid = decode(cache_path(cache, sym, day, "BID").read_bytes() or None, divisor)
-    ask = decode(cache_path(cache, sym, day, "ASK").read_bytes() or None, divisor)
+    paths = [cache_path(cache, sym, day, s) for s in ("BID", "ASK")]
+    if not all(p.exists() for p in paths):
+        return rows
+    bid = decode(paths[0].read_bytes() or None, divisor)
+    ask = decode(paths[1].read_bytes() or None, divisor)
     base = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
     for off in sorted(set(bid) & set(ask)):
         b, a = bid[off], ask[off]
@@ -114,11 +122,18 @@ def main(argv: list[str] | None = None) -> int:
             if not cache_path(args.cache, args.symbol, day, side).exists()]
     print(f"{len(days)} days, {len(jobs)} files to download", flush=True)
     done = 0
+    failed: list[str] = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for _ in pool.map(lambda j: download(args.symbol, j[0], j[1], args.cache), jobs):
+        for err in pool.map(lambda j: download(args.symbol, j[0], j[1], args.cache), jobs):
             done += 1
+            if err:
+                failed.append(err)
+                print(f"FAILED {err}", flush=True)
             if done % 100 == 0:
-                print(f"downloaded {done}/{len(jobs)}", flush=True)
+                print(f"downloaded {done}/{len(jobs)} (failed {len(failed)})", flush=True)
+    if failed:
+        print(f"{len(failed)} files failed; re-run the same command to retry them. Days without both files are skipped.",
+              flush=True)
     year_rows: dict[int, list[str]] = {}
     for day in days:
         year_rows.setdefault(day.year, []).extend(day_rows(args.symbol, day, args.cache, divisor))
