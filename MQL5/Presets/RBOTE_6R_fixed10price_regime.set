@@ -55,3 +55,5 @@ InpChallengeDays=0
 InpTrailingDD=false
 ; tester server clock: -99 = UTC+2 winter / UTC+3 US DST; custom symbols built from UTC data: set 0
 InpServerUtcOffset=-99
+; Multi-year backtest: total-DD floor OFF (measure DD, do not freeze trading after the first breach)
+InpMaxTotalDDPct=0
