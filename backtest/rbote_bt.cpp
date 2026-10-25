@@ -67,6 +67,8 @@ struct Options
    RBDtbsConfig dcfg;
    int htf_offset_h = 2;         // broker clock - UTC for H1/H4 bucketing (EET winter = 2)
    double min_stop_spread_mult = 2.0;
+   std::string label_out = "";   // DTBS: write one independent outcome row per signal and exit
+   int label_horizon_min = 14400; // label: max holding time (minutes) before the open trade is marked to market
    double swap_long = 0.0;       // $ per lot per night (negative = cost), charged at the rollover hour
    double swap_short = 0.0;      // triple on Wednesday night
    int swap_hour = 21;           // UTC rollover hour (manager D-026)
@@ -192,6 +194,9 @@ struct Engine
    std::vector<RBDtbsSignal> dsigs;
    std::vector<RBRegime> dregs;
    long n_tri = 0;
+   CRBSeries h1, h4, d1;                       // DTBS: HTF bars (broker clock buckets)
+   std::vector<double> e_h1_200, e_h4_50, e_d1_50;   // label context: EMAs of HTF closes
+   CRBVec<double> ctx_d1, ctx_h4;              // context filter EMAs (shared code, DTBS.mqh)
 
    double balance = 0, start_balance = 0, hwm = 0;
    int consec_losses = 0;
@@ -323,14 +328,48 @@ struct Engine
          out.Add(b);
      }
 
+   static void ema(const CRBSeries &s, int n, std::vector<double> &out)
+     {
+      out.assign(s.Size(), 0.0);
+      double a = 2.0 / (n + 1), v = 0;
+      for(int i = 0; i < s.Size(); i++)
+        {
+         v = i == 0 ? s.C(0) : v + a * (s.C(i) - v);
+         out[i] = i + 1 >= n ? v : 0.0;   // 0 = not warmed up
+        }
+     }
+
+   // +1 trade direction agrees, -1 disagrees, 0 unknown. slope: EMA(last closed) vs EMA(last-5)
+   int htf_slope(const CRBSeries &h, int per, const std::vector<double> &e, int k, int dir) const
+     {
+      int j = RB_DtbsHtfIndexAt(h, per, m15.Time(k), 900);
+      if(j < 5 || e[j] == 0.0 || e[j - 5] == 0.0)
+         return 0;
+      double d = e[j] - e[j - 5];
+      return d * dir > 0 ? 1 : -1;
+     }
+   int htf_side(const CRBSeries &h, int per, const std::vector<double> &e, int k, int dir) const
+     {
+      int j = RB_DtbsHtfIndexAt(h, per, m15.Time(k), 900);
+      if(j < 0 || e[j] == 0.0)
+         return 0;
+      return (h.C(j) - e[j]) * dir > 0 ? 1 : -1;
+     }
+
    // One deterministic scan over the whole M15 history (the EA rescans its 1200-bar window every
    // bar; triangles need <= max_leg_bars + ext_bars bars, so the signals are the same once warm).
    // RB_DtbsHtfIndexAt only takes HTF bars whose close <= the M15 close: no lookahead.
    void scan_dtbs()
      {
-      CRBSeries h1, h4, all;
+      CRBSeries all;
       build_htf(3600, h1);
       build_htf(4 * 3600, h4);
+      build_htf(86400, d1);
+      ema(h1, 200, e_h1_200);
+      ema(h4, 50, e_h4_50);
+      ema(d1, 50, e_d1_50);
+      RB_DtbsEmaSeries(d1, o.dcfg.ctx_ema_period, ctx_d1);
+      RB_DtbsEmaSeries(h4, o.dcfg.ctx_ema_period, ctx_h4);
       RBBar b;
       for(int i = 0; i < m15.Size(); i++)
         {
@@ -723,6 +762,146 @@ struct Engine
       n_orders++;
      }
 
+   // DTBS research labels: every signal is simulated on its own (no position overlap, no daily
+   // guard) so filters can be screened on a clean signal-level dataset. Exit rules = the engine's
+   // (SL first inside a minute, slippage on SL, commission); TP is not placed: the row stores the
+   // maximum favourable excursion BEFORE the stop (mfe_r), so any RR target can be evaluated later.
+   void write_labels(long long from, long long to)
+     {
+      FILE *f = std::fopen(o.label_out.c_str(), "w");
+      std::fprintf(f, "break_time;entry_time;dir;with_trend;main_trend;sl_mode;entry;sl;risk;atr;stop_atr;leg_atr;"
+                      "body_atr;beyond_atr;b_to_break;a_to_b;hour;weekday;vol_ratio;er;vol_class;ranging;spread;"
+                      "lots;risk_money;cost_r;sl_hit;minutes;mfe_r;end_r;d1_slope;h4_slope;h1_side;"
+                      "rt_filled;rt_pre_mfe_r;rt_risk;rt_q;rt_cost_r;rt_mfe_r;rt_end_r\n");
+      for(size_t i = 0; i < dsigs.size(); i++)
+        {
+         const RBDtbsSignal &g = dsigs[i];
+         int k = g.break_idx;
+         if((long long)m15.Time(k) < from || (long long)m15.Time(k) >= to)
+            continue;
+         if(k + 1 >= m15.Size() || (long long)m15.Time(k + 1) != (long long)m15.Time(k) + 900)
+            continue;
+         int i0 = m15_first[k + 1];
+         const M1 &m = m1[i0];
+         int wd = utc_wday(m.t), hr = utc_hour(m.t);
+         if(o.friday_cutoff >= 0 && ((wd == 5 && hr >= o.friday_cutoff) || wd == 6 || wd == 0))
+            continue;
+         double spread = m.ao - m.bo;
+         double live = g.dir == RB_DIR_BULL ? m.ao : m.bo;
+         RBPlan plan;
+         int used = -1;
+         if(RB_DtbsBuildPlanEx(g, o.dcfg, spec, live, spread, plan, used) != 0)
+            continue;
+         if(RB_DtbsCheckMarket(plan, spec, m.bo, m.ao, o.min_stop_spread_mult) != 0)
+            continue;
+         double lpl = RB_LossPerLot(plan.risk_dist, spec, o.commission, o.slip_ticks);
+         double lots = 0;
+         if(RB_CalcLots(o.balance * o.lim.risk_pct, lpl, spec, o.max_lots, lots) != 0)
+            continue;
+         double rm = lots * lpl;
+         double per_px = lots / spec.tick_size * spec.tick_value_loss;   // money per 1.0 price move
+         int dir = plan.dir;
+         double best = plan.entry, endpx = plan.entry;
+         bool hit = false;
+         int j = i0, last = std::min((int)m1.size() - 1, i0 + o.label_horizon_min);
+         for(; j <= last; j++)
+           {
+            const M1 &x = m1[j];
+            if((long long)x.t - (long long)m.t > (long long)o.label_horizon_min * 60)
+               break;
+            double lo = dir == RB_DIR_BULL ? x.bl : x.al, hi = dir == RB_DIR_BULL ? x.bh : x.ah;
+            double op = dir == RB_DIR_BULL ? x.bo : x.ao;
+            if(dir == RB_DIR_BULL ? lo <= plan.sl : hi >= plan.sl)
+              {
+               double base = dir == RB_DIR_BULL ? std::min(plan.sl, op) : std::max(plan.sl, op);
+               endpx = base - dir * o.slip_ticks * spec.tick_size;
+               hit = true;
+               break;
+              }
+            best = dir == RB_DIR_BULL ? std::max(best, hi) : std::min(best, lo);
+            endpx = dir == RB_DIR_BULL ? x.bc : x.ac;
+           }
+         int jj = std::min(j, (int)m1.size() - 1);
+         double comm = o.commission * lots;
+         double mfe_r = dir * (best - plan.entry) / plan.risk_dist;
+         double end_r = (dir * (endpx - plan.entry) * per_px - comm) / rm;
+         double cost_r = comm / rm;
+         // ---- RETEST entry: limit at the broken level, 8 bars, same SL ----
+         double lvl_raw = g.with_trend ? g.line_at_break : g.b_price;
+         double lvl = dir == RB_DIR_BULL ? RB_RoundDownToTick(lvl_raw, spec.tick_size) : RB_RoundUpToTick(lvl_raw, spec.tick_size);
+         int rt_filled = 0;
+         double rt_pre = 0, rt_risk = dir * (lvl - plan.sl), rt_q = 0, rt_cost = 0, rt_mfe = 0, rt_end = 0;
+         if(rt_risk > 2 * spread && rt_risk > spec.tick_size && dir * (live - lvl) > 0)
+           {
+            double rlpl = RB_LossPerLot(rt_risk, spec, o.commission, o.slip_ticks);
+            double rlots = 0;
+            if(RB_CalcLots(o.balance * o.lim.risk_pct, rlpl, spec, o.max_lots, rlots) == 0)
+              {
+               double rrm = rlots * rlpl;
+               double rper = rlots / spec.tick_size * spec.tick_value_loss;
+               rt_q = rt_risk * rper / rrm;
+               rt_cost = o.commission * rlots / rrm;
+               int jend = std::min((int)m15_first.size() - 1, k + 1 + o.expiry_bars);
+               double pre = lvl;
+               int jf = -1;
+               for(int q = i0; q < m15_first[jend]; q++)
+                 {
+                  const M1 &x = m1[q];
+                  bool fill = dir == RB_DIR_BULL ? x.al <= lvl : x.bh >= lvl;
+                  if(fill) { jf = q; break; }
+                  pre = dir == RB_DIR_BULL ? std::max(pre, x.bh) : std::min(pre, x.al);
+                 }
+               rt_pre = dir * (pre - lvl) / rt_risk;
+               if(jf >= 0)
+                 {
+                  rt_filled = 1;
+                  double bst = lvl, ep = lvl;
+                  bool rh = false;
+                  int lst = std::min((int)m1.size() - 1, jf + o.label_horizon_min);
+                  for(int q = jf; q <= lst; q++)
+                    {
+                     const M1 &x = m1[q];
+                     if((long long)x.t - (long long)m1[jf].t > (long long)o.label_horizon_min * 60)
+                        break;
+                     double lo2 = dir == RB_DIR_BULL ? x.bl : x.al, hi2 = dir == RB_DIR_BULL ? x.bh : x.ah;
+                     double op2 = dir == RB_DIR_BULL ? x.bo : x.ao;
+                     if(dir == RB_DIR_BULL ? lo2 <= plan.sl : hi2 >= plan.sl)
+                       {
+                        double base = q == jf ? plan.sl : (dir == RB_DIR_BULL ? std::min(plan.sl, op2) : std::max(plan.sl, op2));
+                        ep = base - dir * o.slip_ticks * spec.tick_size;
+                        rh = true;
+                        break;
+                       }
+                     if(q > jf)   // the fill minute's extreme may have come before the fill
+                        bst = dir == RB_DIR_BULL ? std::max(bst, hi2) : std::min(bst, lo2);
+                     ep = dir == RB_DIR_BULL ? x.bc : x.ac;
+                    }
+                  (void)rh;
+                  rt_mfe = dir * (bst - lvl) / rt_risk;
+                  rt_end = (dir * (ep - lvl) * rper - o.commission * rlots) / rrm;
+                 }
+              }
+           }
+         int c_d1 = htf_slope(d1, 86400, e_d1_50, k, dir);
+         int c_h4 = htf_slope(h4, 4 * 3600, e_h4_50, k, dir);
+         int c_h1 = htf_side(h1, 3600, e_h1_200, k, dir);
+         const RBRegime &rg = dregs[i];
+         double body = std::fabs(m15.C(k) - m15.O(k));
+         double level = g.with_trend ? g.line_at_break : g.b_price;
+         double beyond = dir * (m15.C(k) - level);
+         double atr = g.atr > 0 ? g.atr : 1e-9;
+         std::fprintf(f, "%s;%s;%d;%d;%d;%s;%.2f;%.2f;%.2f;%.3f;%.3f;%.3f;%.3f;%.3f;%d;%d;%d;%d;%.3f;%.3f;%d;%d;%.2f;"
+                         "%.2f;%.2f;%.4f;%d;%d;%.4f;%.4f;%d;%d;%d;%d;%.4f;%.3f;%.4f;%.4f;%.4f;%.4f\n",
+                      fmt_time(m15.Time(k)).c_str(), fmt_time(m.t).c_str(), dir, g.with_trend ? 1 : 0, g.main_trend,
+                      RB_DtbsSlModeText(used).c_str(), plan.entry, plan.sl, plan.risk_dist, g.atr, plan.risk_dist / atr,
+                      std::fabs(g.b_price - g.a_price) / atr, body / atr, beyond / atr, k - g.b_idx, g.b_idx - g.a_idx,
+                      hr, wd, rg.vol_ratio, rg.er, rg.valid ? rg.vol_class : -1, rg.ranging ? 1 : 0, spread,
+                      lots, rm, cost_r, hit ? 1 : 0, (int)((m1[jj].t - m.t) / 60), mfe_r, end_r, c_d1, c_h4, c_h1,
+                      rt_filled, rt_pre, rt_risk, rt_q, rt_cost, rt_mfe, rt_end);
+        }
+      std::fclose(f);
+     }
+
    // DTBS: market order at the first minute of the bar after the break bar
    void on_dtbs_signal(size_t idx, int k)
      {
@@ -751,6 +930,13 @@ struct Engine
       if(o.friday_cutoff >= 0 && ((wd == 5 && hr >= o.friday_cutoff) || wd == 6 || wd == 0))
         {
          reject("FRIDAY_CUTOFF");
+         return;
+        }
+      if(o.dcfg.ctx_filter &&
+         (RB_DtbsSlopeAgree(d1, 86400, ctx_d1, m15.Time(k), 900, o.dcfg.ctx_slope_bars, g.dir) != 1 ||
+          RB_DtbsSlopeAgree(h4, 4 * 3600, ctx_h4, m15.Time(k), 900, o.dcfg.ctx_slope_bars, g.dir) != 1))
+        {
+         reject("CTX_FILTER");
          return;
         }
       double spread = m.ao - m.bo;
@@ -847,6 +1033,12 @@ struct Engine
          scan_dtbs();
       else
          scan_signals();
+      if(o.strategy == 2 && !o.label_out.empty())
+        {
+         write_labels(from, to);
+         std::printf("labels written: %s (%zu DTBS signals in the data)\n", o.label_out.c_str(), dsigs.size());
+         return;
+        }
 
       balance = start_balance = hwm = o.balance;
       min_equity_ever = balance;
@@ -961,7 +1153,8 @@ static void usage()
        "  --strategy rbote|dtbs   DTBS: --dt-rr 1.5 --dt-ext 20 --dt-dirs both|with --dt-confirm close|wick\n"
        "     --dt-sl adaptive|break_start|break_candle|extreme|atr --dt-buffer 0.30 --dt-sl-atr 1.5\n"
        "     --dt-min-stop-atr 0.5 --dt-max-stop-atr 3 --dt-htf all|majority --dt-swing 2 --dt-htf-swing 2\n"
-       "     --dt-leg-atr 1.0 --dt-max-leg 200 --htf-offset 2");
+       "     --dt-leg-atr 1.0 --dt-max-leg 200 --htf-offset 2 --dt-ctx on|off\n"
+       "     --label-out FILE [--label-horizon 14400]  one independent outcome row per DTBS signal, then exit");
 }
 
 int main(int argc, char **argv)
@@ -1083,6 +1276,9 @@ int main(int argc, char **argv)
       else if(a == "--dt-leg-atr") o.dcfg.min_leg_atr = num();
       else if(a == "--dt-max-leg") o.dcfg.max_leg_bars = (int)num();
       else if(a == "--htf-offset") o.htf_offset_h = (int)num();
+      else if(a == "--label-out") o.label_out = next();
+      else if(a == "--dt-ctx") o.dcfg.ctx_filter = next() == "on";
+      else if(a == "--label-horizon") o.label_horizon_min = (int)num();
       else
         {
          usage();

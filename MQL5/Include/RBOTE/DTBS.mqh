@@ -143,6 +143,9 @@ struct RBDtbsConfig
    double min_stop_atr;     // ADAPTIVE: lower bound of the stop distance in ATR
    double max_stop_atr;     // reject when stop distance > max_stop_atr * ATR (0 = off)
    int    htf_agreement;    // ENUM_RB_DTBS_HTF_AGREE
+   bool   ctx_filter;       // D1 + H4 EMA slope must point in the trade direction (D-041)
+   int    ctx_ema_period;   // EMA of HTF closes (50)
+   int    ctx_slope_bars;   // slope = EMA(last closed) - EMA(last closed - n) (5)
 
    void              Defaults(void)
      {
@@ -161,6 +164,9 @@ struct RBDtbsConfig
       min_stop_atr    = 0.5;
       max_stop_atr    = 3.0;
       htf_agreement   = RB_DTBS_HTF_ALL;
+      ctx_filter      = false;
+      ctx_ema_period  = 50;
+      ctx_slope_bars  = 5;
      }
   };
 
@@ -288,6 +294,24 @@ int RB_DtbsCombine2(int a, int b, int mode)
    return RB_DtbsCombine(v, mode);
   }
 
+//+------------------------------------------------------------------+
+//| Context filter (D-041): EMA slope of HTF closes                  |
+//+------------------------------------------------------------------+
+//--- EMA of closes, seeded with the first close; 0 until `period` bars were seen (not warmed up).
+void RB_DtbsEmaSeries(const CRBSeries &s, int period, CRBVec<double> &out)
+  {
+   out.Clear();
+   double a = 2.0 / (period + 1), v = 0.0;
+   for(int i = 0; i < s.Size(); i++)
+     {
+      v = (i == 0) ? s.C(0) : v + a * (s.C(i) - v);
+      double w = (i + 1 >= period) ? v : 0.0;
+      out.Push(w);
+     }
+  }
+
+//--- +1: EMA slope of the last HTF bar closed by the end of LTF bar `ltf_open` points in `dir`,
+//--- -1: against, 0: unknown (not enough bars / not warmed up). Closed HTF bars only.
 //--- Index of the last HTF bar whose close time (open + htf_period_sec) is <= the close time
 //--- of the LTF bar opening at ltf_open. -1 if none. HTF series must be chronological.
 int RB_DtbsHtfIndexAt(const CRBSeries &htf, int htf_period_sec, datetime ltf_open, int ltf_period_sec)
@@ -307,6 +331,22 @@ int RB_DtbsHtfIndexAt(const CRBSeries &htf, int htf_period_sec, datetime ltf_ope
          hi = mid - 1;
      }
    return ans;
+  }
+
+//--- +1: EMA slope of the last HTF bar closed by the end of LTF bar `ltf_open` points in `dir`,
+//--- -1: against, 0: unknown (not enough bars / not warmed up). Closed HTF bars only.
+int RB_DtbsSlopeAgree(const CRBSeries &htf, int htf_period_sec, const CRBVec<double> &ema, datetime ltf_open,
+                      int ltf_period_sec, int slope_bars, int dir)
+  {
+   int j = RB_DtbsHtfIndexAt(htf, htf_period_sec, ltf_open, ltf_period_sec);
+   if(j < slope_bars || j >= ema.Size())
+      return 0;
+   double e1 = 0.0, e0 = 0.0;
+   ema.Get(j, e1);
+   ema.Get(j - slope_bars, e0);
+   if(e1 == 0.0 || e0 == 0.0 || e1 == e0)
+      return 0;
+   return ((e1 - e0) * dir > 0.0) ? 1 : -1;
   }
 
 //--- out[k] = HTF trend of the last HTF bar closed at the close of LTF bar k (NONE if none).

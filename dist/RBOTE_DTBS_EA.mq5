@@ -2573,6 +2573,9 @@ struct RBDtbsConfig
    double min_stop_atr;     // ADAPTIVE: lower bound of the stop distance in ATR
    double max_stop_atr;     // reject when stop distance > max_stop_atr * ATR (0 = off)
    int    htf_agreement;    // ENUM_RB_DTBS_HTF_AGREE
+   bool   ctx_filter;       // D1 + H4 EMA slope must point in the trade direction (D-041)
+   int    ctx_ema_period;   // EMA of HTF closes (50)
+   int    ctx_slope_bars;   // slope = EMA(last closed) - EMA(last closed - n) (5)
 
    void              Defaults(void)
      {
@@ -2591,6 +2594,9 @@ struct RBDtbsConfig
       min_stop_atr    = 0.5;
       max_stop_atr    = 3.0;
       htf_agreement   = RB_DTBS_HTF_ALL;
+      ctx_filter      = false;
+      ctx_ema_period  = 50;
+      ctx_slope_bars  = 5;
      }
   };
 
@@ -2718,6 +2724,24 @@ int RB_DtbsCombine2(int a, int b, int mode)
    return RB_DtbsCombine(v, mode);
   }
 
+//+------------------------------------------------------------------+
+//| Context filter (D-041): EMA slope of HTF closes                  |
+//+------------------------------------------------------------------+
+//--- EMA of closes, seeded with the first close; 0 until `period` bars were seen (not warmed up).
+void RB_DtbsEmaSeries(const CRBSeries &s, int period, CRBVec<double> &out)
+  {
+   out.Clear();
+   double a = 2.0 / (period + 1), v = 0.0;
+   for(int i = 0; i < s.Size(); i++)
+     {
+      v = (i == 0) ? s.C(0) : v + a * (s.C(i) - v);
+      double w = (i + 1 >= period) ? v : 0.0;
+      out.Push(w);
+     }
+  }
+
+//--- +1: EMA slope of the last HTF bar closed by the end of LTF bar `ltf_open` points in `dir`,
+//--- -1: against, 0: unknown (not enough bars / not warmed up). Closed HTF bars only.
 //--- Index of the last HTF bar whose close time (open + htf_period_sec) is <= the close time
 //--- of the LTF bar opening at ltf_open. -1 if none. HTF series must be chronological.
 int RB_DtbsHtfIndexAt(const CRBSeries &htf, int htf_period_sec, datetime ltf_open, int ltf_period_sec)
@@ -2737,6 +2761,22 @@ int RB_DtbsHtfIndexAt(const CRBSeries &htf, int htf_period_sec, datetime ltf_ope
          hi = mid - 1;
      }
    return ans;
+  }
+
+//--- +1: EMA slope of the last HTF bar closed by the end of LTF bar `ltf_open` points in `dir`,
+//--- -1: against, 0: unknown (not enough bars / not warmed up). Closed HTF bars only.
+int RB_DtbsSlopeAgree(const CRBSeries &htf, int htf_period_sec, const CRBVec<double> &ema, datetime ltf_open,
+                      int ltf_period_sec, int slope_bars, int dir)
+  {
+   int j = RB_DtbsHtfIndexAt(htf, htf_period_sec, ltf_open, ltf_period_sec);
+   if(j < slope_bars || j >= ema.Size())
+      return 0;
+   double e1 = 0.0, e0 = 0.0;
+   ema.Get(j, e1);
+   ema.Get(j - slope_bars, e0);
+   if(e1 == 0.0 || e0 == 0.0 || e1 == e0)
+      return 0;
+   return ((e1 - e0) * dir > 0.0) ? 1 : -1;
   }
 
 //--- out[k] = HTF trend of the last HTF bar closed at the close of LTF bar k (NONE if none).
@@ -3272,8 +3312,11 @@ input double InpDtbsSlBuffer       = 0.30;    // Stop buffer, price (buffer = ma
 input double InpDtbsSlAtrMult      = 1.5;     // ATR stop mode: k x ATR
 input double InpDtbsMinStopATR     = 0.5;     // ADAPTIVE: min stop distance in ATR
 input double InpDtbsMaxStopATR     = 3.0;     // Max stop distance in ATR (0 = off)
-input double InpDtbsRR             = 1.5;     // Target in R (confirmed: 1.5)
+input double InpDtbsRR             = 3.0;     // Target in R (3 with the context filter, D-041; source 1.5 lost in 2020-23)
 input ENUM_RB_DTBS_HTF_AGREE  InpDtbsHtfAgree  = RB_DTBS_HTF_ALL;       // H1 + H4 main trend agreement
+input bool   InpDtbsCtxFilter      = true;    // Context: D1 + H4 EMA slope in trade direction (D-041, NOT validated)
+input int    InpDtbsCtxEma         = 50;      // Context: EMA period of D1 / H4 closes
+input int    InpDtbsCtxSlopeBars   = 5;       // Context: slope over this many closed D1 / H4 bars
 input int    InpDtbsSwingN         = 2;       // M15 fractal strength (ASSUMPTION 2)
 input int    InpDtbsHtfSwingN      = 2;       // H1/H4 fractal strength for the main trend
 input double InpDtbsMinLegATR      = 1.0;     // Counter leg pB - pA >= x ATR (ASSUMPTION 1.0)
@@ -3485,6 +3528,9 @@ void BuildConfig(void)
    g_dcfg.min_stop_atr    = InpDtbsMinStopATR;
    g_dcfg.max_stop_atr    = InpDtbsMaxStopATR;
    g_dcfg.htf_agreement   = InpDtbsHtfAgree;
+   g_dcfg.ctx_filter      = InpDtbsCtxFilter;
+   g_dcfg.ctx_ema_period  = InpDtbsCtxEma;
+   g_dcfg.ctx_slope_bars  = InpDtbsCtxSlopeBars;
 
    g_reg.Defaults();
    g_reg.enabled         = InpRegimeEnabled;
@@ -3870,7 +3916,8 @@ int OnInit(void)
        InpDtbsExtBars < 1 || InpDtbsSwingN < 1 || InpDtbsHtfSwingN < 1 || InpDtbsAtrPeriod < 1 ||
        InpDtbsMaxLegBars < 2 * InpDtbsSwingN + 1 || InpDtbsSlBuffer < 0.0 || InpDtbsMinStopATR < 0.0 ||
        InpDtbsMaxStopATR < 0.0 || (InpDtbsMaxStopATR > 0.0 && InpDtbsMaxStopATR < InpDtbsMinStopATR) ||
-       InpDtbsHtfBars < 4 * InpDtbsHtfSwingN + 20 || InpLookbackBars < InpDtbsMaxLegBars + InpDtbsExtBars + 50))
+       InpDtbsHtfBars < 4 * InpDtbsHtfSwingN + 20 || InpDtbsCtxEma < 2 || InpDtbsCtxSlopeBars < 1 ||
+       (InpDtbsCtxFilter && InpDtbsHtfBars < 3 * InpDtbsCtxEma + InpDtbsCtxSlopeBars) || InpLookbackBars < InpDtbsMaxLegBars + InpDtbsExtBars + 50))
      {
       g_log.Log("INIT_REFUSED", "", "invalid DTBS inputs", "check risk/rr/ext bars/swing/stop ATR bounds/HTF bars/lookback");
       return INIT_PARAMETERS_INCORRECT;
@@ -4512,7 +4559,7 @@ void ProcessSignal(const RBSignal &sig, const CRBSeries &series)
 //| Profit scaling uses the same formula with base InpDtbsRiskPct;   |
 //| edge weighting (RBOTE setup features) is not applied (x1.00).    |
 //+------------------------------------------------------------------+
-void ProcessDtbsSignal(const RBDtbsSignal &sig, const CRBSeries &series)
+void ProcessDtbsSignal(const RBDtbsSignal &sig, const CRBSeries &series, const string ctx_reject)
   {
    string id = RB_DtbsSignalId(sig.dir, sig.break_time);
    string ctx = StringFormat("%s %s break trend=%s A[%s @%s] B[%s @%s] C[%s @%s] line=%s close=%s %s",
@@ -4544,6 +4591,11 @@ void ProcessDtbsSignal(const RBDtbsSignal &sig, const CRBSeries &series)
    RB_RegimeDecide(reg, g_reg, InpDtbsRR, rd);
    ctx += StringFormat(" regime=%s VR=%.2f ER=%.2f", rd.reason, reg.vol_ratio, reg.er);
    g_log.Log("SIGNAL", id, ctx, "DTBS break confirmed");
+   if(ctx_reject != "")
+     {
+      g_log.Log("SIGNAL_REJECTED", id, ctx, "CTX_FILTER " + ctx_reject);
+      return;
+     }
    if(!rd.allow)
      {
       g_log.Log("SIGNAL_REJECTED", id, ctx, "REGIME_SKIP " + rd.reason);
@@ -4824,12 +4876,43 @@ void EvaluateDtbs(const MqlRates &rates[], int n, bool connected)
    CRBVec<RBDtbsSignal>   sigs;
    RB_DtbsScanEx(s, mt, g_dcfg, tris, sigs);   // also computes ATR on s (regime uses it)
 
+   //--- context filter (D-041): D1 and H4 EMA slope of closed bars must point in the trade direction
+   CRBSeries d1;
+   CRBVec<double> e_d1, e_h4;
+   bool ctx_data = false;
+   string ctx_why = "";
+   if(g_dcfg.ctx_filter)
+     {
+      ctx_data = CopyHtfSeries(PERIOD_D1, ltf_close, d1, connected, ctx_why);
+      if(ctx_data)
+        {
+         RB_DtbsEmaSeries(d1, g_dcfg.ctx_ema_period, e_d1);
+         RB_DtbsEmaSeries(h4, g_dcfg.ctx_ema_period, e_h4);
+        }
+     }
    RBDtbsSignal sig;
    for(int i = 0; i < sigs.Size(); i++)
      {
       sigs.Get(i, sig);
-      if(sig.break_idx == n - 1)
-         ProcessDtbsSignal(sig, s);
+      if(sig.break_idx != n - 1)
+         continue;
+      string rej = "";
+      if(g_dcfg.ctx_filter)
+        {
+         if(!ctx_data)
+            rej = "no D1 data: " + ctx_why;
+         else
+           {
+            int ad = RB_DtbsSlopeAgree(d1, PeriodSeconds(PERIOD_D1), e_d1, s.Time(n - 1), PeriodSeconds(TF),
+                                       g_dcfg.ctx_slope_bars, sig.dir);
+            int ah = RB_DtbsSlopeAgree(h4, PeriodSeconds(PERIOD_H4), e_h4, s.Time(n - 1), PeriodSeconds(TF),
+                                       g_dcfg.ctx_slope_bars, sig.dir);
+            if(ad != 1 || ah != 1)
+               rej = StringFormat("D1 slope %s, H4 slope %s", ad == 1 ? "with" : ad == -1 ? "against" : "unknown",
+                                  ah == 1 ? "with" : ah == -1 ? "against" : "unknown");
+           }
+        }
+      ProcessDtbsSignal(sig, s, rej);
      }
   }
 

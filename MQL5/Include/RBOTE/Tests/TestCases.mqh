@@ -1689,6 +1689,47 @@ void T_DtSig(RBDtbsSignal &s, int dir)
    s.start_price = 114.5;
   }
 
+//--- D-041 context filter: EMA of HTF closes and slope agreement (closed HTF bars only)
+void Test_DTBS_Context(CRBTest &t)
+  {
+   CRBSeries h;
+   RBBar b;
+   for(int i = 0; i < 20; i++)   // H4 bars from 2024-01-01 00:00, rising closes 100, 101, ...
+     {
+      b.time = (datetime)(1704067200 + i * 14400);
+      b.open = 100.0 + i;
+      b.high = 101.0 + i;
+      b.low = 99.0 + i;
+      b.close = 100.0 + i;
+      h.Add(b);
+     }
+   CRBVec<double> e;
+   RB_DtbsEmaSeries(h, 3, e);
+   double v0 = -1, v1 = -1, v2 = -1, v3 = -1;
+   e.Get(0, v0);
+   e.Get(1, v1);
+   e.Get(2, v2);
+   e.Get(3, v3);
+   t.Check(v0 == 0.0 && v1 == 0.0, "ema: 0 before warm-up");
+   t.Near(v2, 101.25, 1e-9, "ema(3) after 3 closes (seeded with the first close)");
+   t.Near(v3, 102.125, 1e-9, "ema(3) next value");
+   // M15 bar opening 2024-01-02 15:45 closes 16:00 = close of H4 bar #9 (12:00-16:00)
+   datetime m15 = (datetime)(1704067200 + 9 * 14400 + 3 * 3600 + 2700);
+   t.Check(RB_DtbsSlopeAgree(h, 14400, e, m15, 900, 5, RB_DIR_BULL) == 1, "rising EMA agrees with a buy");
+   t.Check(RB_DtbsSlopeAgree(h, 14400, e, m15, 900, 5, RB_DIR_BEAR) == -1, "rising EMA is against a sell");
+   // M15 bar that closes 15:45: H4 bar #9 still forming -> last closed is #8 (no lookahead)
+   datetime early = m15 - 900;
+   CRBVec<double> e2;
+   RB_DtbsEmaSeries(h, 3, e2);
+   t.Check(RB_DtbsHtfIndexAt(h, 14400, early, 900) == 8, "context uses the last CLOSED H4 bar");
+   // not enough history for the slope -> unknown
+   datetime first = (datetime)(1704067200 + 3 * 14400 - 900);
+   t.Check(RB_DtbsSlopeAgree(h, 14400, e, first, 900, 5, RB_DIR_BULL) == 0, "slope unknown without history");
+   RBDtbsConfig c;
+   c.Defaults();
+   t.Check(!c.ctx_filter && c.ctx_ema_period == 50 && c.ctx_slope_bars == 5, "ctx defaults: off in the library, 50 / 5");
+  }
+
 void Test_DTBS_Plan(CRBTest &t)
   {
    RBSymbolSpec sp;
@@ -1878,6 +1919,7 @@ void RB_RunAllTests(CRBTest &t)
    Test_DTBS_Trend(t);
    Test_DTBS_Lookahead(t);
    Test_DTBS_Plan(t);
+   Test_DTBS_Context(t);
    RB_TestPrint("RBOTE tests: passed=" + IntegerToString(t.passed) + " failed=" + IntegerToString(t.failed));
   }
 
