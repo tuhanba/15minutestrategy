@@ -188,7 +188,7 @@ Ayrıntılar `docs/03_TEST_VE_CANLI_GECIS_KONTROL_LISTESI.md` içinde.
 
 ## Bilinen sınırlamalar
 
-- **MQL5 derlemesi doğrulandı** (2026-10-24, MetaEditor build 6283, WineHQ Wine 11): EA ve test script'i 0 hata / 0 uyarı; `RBOTE_Tests` MT5 terminalinde 225/225 geçti. Linux'ta tekrar: `tools/compile_mql5.sh` (bkz. docs/BACKTEST.md). EA henüz bir hesapta veya Strategy Tester'da çalıştırılmadı.
+- **MQL5 derlemesi doğrulandı** (2026-10-24, MetaEditor build 6283, WineHQ Wine 11): EA ve test script'i 0 hata / 0 uyarı; `RBOTE_Tests` MT5 terminalinde 234/234 geçti (2026-10-25, inceleme düzeltmelerinden sonra). Linux'ta tekrar: `tools/compile_mql5.sh` (bkz. docs/BACKTEST.md). EA henüz bir hesapta veya Strategy Tester'da çalıştırılmadı.
 - Ekonomik takvim filtresi Strategy Tester'da çalışmaz (MT5 kısıtı). Backtest haber filtresiz yapılır.
 - Netting hesaplarda aynı semboldeki başka pozisyonlarla birleşme olabilir. Hedging hesap önerilir.
 - `trades.csv` yalnız kapanmış işlemleri içerir. Gün içi floating zarar analizde yoktur. Tester raporundaki equity DD ayrıca okunmalıdır.
